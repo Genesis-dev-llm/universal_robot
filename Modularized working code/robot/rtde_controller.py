@@ -1,0 +1,642 @@
+"""
+RTDE Robot Controller (Refactored)
+Main interface for Universal Robot control via RTDE
+"""
+
+import time
+import math
+from datetime import datetime
+from collections import deque
+
+from core.error_handler import RobotError
+from core.math_utils import clamp_position, rotation_vector_add, calculate_angular_velocity
+from robot.safety_checker import SafetyChecker
+from config.constants import (
+    UR_BASE_POSITION, UR_BASE_ORIENTATION,
+    UR_MAX_VELOCITY, UR_MAX_ACCELERATION,
+    RTDE_MAX_FREQUENCY
+)
+
+# Try to import RTDE
+try:
+    import rtde_control
+    import rtde_receive
+    from rtde_control import RobotiqGripper
+    RTDE_AVAILABLE = True
+except ImportError:
+    RTDE_AVAILABLE = False
+    print("WARNING: ur-rtde not installed. Robot control disabled.")
+
+class RTDEController:
+    """
+    Universal Robot RTDE control interface with comprehensive safety
+    """
+    
+    def __init__(self, robot_ip, enabled=False, simulate=True, config_mgr=None):
+        """
+        Initialize RTDE controller
+        
+        Args:
+            robot_ip: Robot IP address
+            enabled: Enable robot control
+            simulate: Simulation mode (no real commands)
+            config_mgr: Configuration manager
+        """
+        self.robot_ip = robot_ip
+        self.enabled = enabled and RTDE_AVAILABLE
+        self.simulate = simulate
+        self.config_mgr = config_mgr
+        
+        # RTDE interfaces
+        self.rtde_c = None
+        self.rtde_r = None
+        self.gripper = None
+        
+        # Safety checker
+        self.safety_checker = SafetyChecker(log_file=None)
+        
+        # Control state
+        self.command_queue = deque(maxlen=100)
+        self.blend_mode = True   # Default to smooth blending (easier)
+        self.last_command_time = 0
+        
+        # Command Thresholding (to prevent jittery updates)
+        self.last_sent_pose = None
+        self.last_sent_velocity = None
+        self.POSE_DELTA_THRESHOLD = 0.0005  # 0.5mm
+        self.ORIENT_DELTA_THRESHOLD = 0.005 # ~0.3 degrees
+        self.VEL_DELTA_THRESHOLD = 0.001    # 1mm/s or 0.001 rad/s
+        
+        # IMU data smoothing
+        self.smoothed_roll = 0.0
+        self.smoothed_pitch = 0.0
+        self.smoothed_yaw = 0.0
+        self.smoothing_factor = config_mgr.get('safety', 'smoothing_factor', 0.3) if config_mgr else 0.3
+        
+        # Velocity ramping
+        self.current_velocity_scale = 0.0
+        self.target_velocity_scale = 1.0
+        self.velocity_ramp_rate = config_mgr.get('safety', 'velocity_ramp_rate', 0.1) if config_mgr else 0.1
+        
+        # Robot state
+        self.current_tcp_pose = UR_BASE_POSITION + UR_BASE_ORIENTATION
+        self.target_tcp_pose = UR_BASE_POSITION + UR_BASE_ORIENTATION
+        self.last_joint_positions = [0, -1.57, 1.57, -1.57, -1.57, 0]  # Safe home
+        self.robot_status_text = "Disconnected"
+        self.last_state_update = 0
+        self.state_update_interval = 0.1
+        
+        # Connection recovery
+        self.connection_lost = False
+        self.reconnect_attempts = 0
+        self.max_reconnect_attempts = 5
+        self.last_reconnect_attempt = 0
+        self.reconnect_cooldown = 2.0
+        
+        # Statistics
+        self.total_commands_sent = 0
+        self.successful_commands = 0
+        self.failed_commands = 0
+        
+        # Initialize log file in logs/ folder
+        import os
+        os.makedirs("logs", exist_ok=True)
+        # Use fixed filename to prevent clutter
+        log_filename = "logs/latest_session.log"
+        try:
+            self.log_file = open(log_filename, "w")
+            self.log_file.write(f"# RTDE Control Log - {datetime.now()}\n")
+            self.log_file.write(f"# Mode: {'SIMULATE' if simulate else 'REAL'}\n")
+            self.log_file.write(f"# Robot IP: {robot_ip}\n\n")
+            print(f"Logging to: {log_filename}")
+            
+            # Update safety checker with log file
+            self.safety_checker.log_file = self.log_file
+        except Exception as e:
+            print(f"Warning: Could not create log file: {e}")
+            self.log_file = None
+        
+        if self.enabled and not self.simulate:
+            self.connect()
+    
+    def connect(self):
+        """Connect to UR robot via RTDE"""
+        try:
+            print(f"Connecting to UR robot at {self.robot_ip}...")
+            self.rtde_c = rtde_control.RTDEControlInterface(self.robot_ip)
+            self.rtde_r = rtde_receive.RTDEReceiveInterface(self.robot_ip)
+            
+            # Update safety checker with RTDE receive
+            self.safety_checker.set_rtde_receive(self.rtde_r)
+            
+            # Get current robot state
+            current_pose = self.rtde_r.getActualTCPPose()
+            if current_pose:
+                self.current_tcp_pose = current_pose
+                self.target_tcp_pose = current_pose[:]
+                print(f"Current TCP: [{current_pose[0]:.3f}, {current_pose[1]:.3f}, {current_pose[2]:.3f}]")
+            
+            print(f"RTDE connected successfully")
+            self.log_command(f"# Connected to robot at {self.robot_ip}")
+            
+            # Reset connection tracking
+            self.connection_lost = False
+            self.reconnect_attempts = 0
+            
+            # 3. Initialize Gripper
+            try:
+                self.gripper = RobotiqGripper(self.robot_ip)
+                self.gripper.connect()
+                print("✅ RTDE: Robotiq Gripper connected")
+            except Exception as e:
+                print(f"⚠️ RTDE: Gripper not found or failed to connect: {e}")
+                self.gripper = None
+                
+            return True
+            
+        except Exception as e:
+            error_msg = RobotError.format_error('E102', str(e), f"IP: {self.robot_ip}")
+            print(error_msg)
+            RobotError.log_error(self.log_file, 'E102', str(e), f"IP: {self.robot_ip}")
+            self.rtde_c = None
+            self.rtde_r = None
+            self.connection_lost = True
+            return False
+    
+    def attempt_reconnect(self):
+        """Attempt reconnection after connection loss"""
+        current_time = time.time()
+        
+        if current_time - self.last_reconnect_attempt < self.reconnect_cooldown:
+            return False
+        
+        if self.reconnect_attempts >= self.max_reconnect_attempts:
+            error_msg = RobotError.format_error('E103',
+                f"Maximum attempts ({self.max_reconnect_attempts}) reached",
+                "Connection recovery failed")
+            print(error_msg)
+            RobotError.log_error(self.log_file, 'E103',
+                f"Max attempts: {self.max_reconnect_attempts}", "Recovery failed")
+            return False
+        
+        self.last_reconnect_attempt = current_time
+        self.reconnect_attempts += 1
+        
+        print(f"Reconnecting ({self.reconnect_attempts}/{self.max_reconnect_attempts})...")
+        self.log_command(f"# Reconnection attempt {self.reconnect_attempts}")
+        
+        # Close existing connections
+        try:
+            if self.rtde_c:
+                self.rtde_c.disconnect()
+            if self.rtde_r:
+                self.rtde_r.disconnect()
+        except:
+            pass
+        
+        return self.connect()
+    
+    def log_command(self, command):
+        """Log command with timestamp"""
+        if self.log_file and not self.log_file.closed:
+            timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+            self.log_file.write(f"[{timestamp}] {command}\n")
+            self.log_file.flush()
+    
+
+    
+    def update_robot_status(self):
+        """Update robot status periodically"""
+        current_time = time.time()
+        if current_time - self.last_state_update < self.state_update_interval:
+            return
+        
+        self.last_state_update = current_time
+        
+        if not self.enabled or not self.rtde_r:
+            self.robot_status_text = "Robot: DISABLED"
+            return
+        
+        try:
+            # Get current TCP pose
+            tcp_pose = self.rtde_r.getActualTCPPose()
+            if tcp_pose:
+                self.current_tcp_pose = tcp_pose
+            
+            # Get joint positions
+            joint_pos = self.rtde_r.getActualQ()
+            if joint_pos:
+                self.last_joint_positions = joint_pos
+            
+            # Check status
+            robot_mode = self.rtde_r.getRobotMode()
+            safety_mode = self.rtde_r.getSafetyMode()
+            
+            if robot_mode == 7 and safety_mode == 1:
+                self.robot_status_text = f"Robot: READY | TCP: [{tcp_pose[0]:.3f}, {tcp_pose[1]:.3f}, {tcp_pose[2]:.3f}]"
+            else:
+                self.robot_status_text = f"Robot: NOT READY (Mode: {robot_mode}, Safety: {safety_mode})"
+                
+        except Exception as e:
+            self.robot_status_text = f"Robot: ERROR - {str(e)[:50]}"
+            self.connection_lost = True
+    
+    def apply_smoothing(self, roll, pitch, yaw):
+        """Apply exponential smoothing to IMU data"""
+        self.smoothed_roll = (1 - self.smoothing_factor) * self.smoothed_roll + self.smoothing_factor * roll
+        self.smoothed_pitch = (1 - self.smoothing_factor) * self.smoothed_pitch + self.smoothing_factor * pitch
+        self.smoothed_yaw = (1 - self.smoothing_factor) * self.smoothed_yaw + self.smoothing_factor * yaw
+        return self.smoothed_roll, self.smoothed_pitch, self.smoothed_yaw
+    
+    def calculate_velocity_scale(self, roll, pitch, yaw):
+        """Scale velocity based on IMU movement speed"""
+        angular_velocity = calculate_angular_velocity(roll, pitch, yaw)
+        
+        # Slow down if moving IMU too fast
+        if angular_velocity > 30.0:
+            scale = 30.0 / angular_velocity
+            target_scale = max(0.1, min(1.0, scale))
+        else:
+            target_scale = 1.0
+        
+        # Apply smooth ramping
+        if target_scale > self.current_velocity_scale:
+            self.current_velocity_scale = min(target_scale,
+                self.current_velocity_scale + self.velocity_ramp_rate)
+        else:
+            self.current_velocity_scale = max(target_scale,
+                self.current_velocity_scale - self.velocity_ramp_rate)
+        
+        return self.current_velocity_scale
+    
+    def move_tcp_cartesian(self, position_delta, orientation_delta, velocity_scale=1.0):
+        """
+        Execute TCP movement with full safety validation
+        
+        Args:
+            position_delta: Position change [dx, dy, dz]
+            orientation_delta: Orientation change [drx, dry, drz]
+            velocity_scale: Velocity scaling factor
+        
+        Returns:
+            True if successful, False otherwise
+        """
+        current_time = time.time()
+        
+        # Validate robot state
+        state_ok, state_msg = self.safety_checker.validate_robot_state()
+        if not state_ok:
+            if self.total_commands_sent % 100 == 0:
+                print(state_msg)
+            self.log_command(f"# BLOCKED by state validation")
+            return False
+        
+        # Rate limiting (125Hz max for RTDE)
+        if current_time - self.last_command_time < RTDE_MAX_FREQUENCY:
+            return False
+        
+        self.last_command_time = current_time
+        self.total_commands_sent += 1
+        
+        # Get current pose
+        if self.rtde_r and not self.simulate:
+            try:
+                current_pose = self.rtde_r.getActualTCPPose()
+                if current_pose:
+                    self.current_tcp_pose = current_pose
+            except:
+                pass
+        
+        # Calculate new position
+        new_position = [
+            self.current_tcp_pose[0] + position_delta[0],
+            self.current_tcp_pose[1] + position_delta[1],
+            self.current_tcp_pose[2] + position_delta[2]
+        ]
+        
+        # Clamp to workspace
+        new_position = clamp_position(new_position)
+        
+        # Calculate new orientation
+        current_orientation = self.current_tcp_pose[3:6]
+        new_orientation = rotation_vector_add(current_orientation, orientation_delta)
+        
+        # Combine into target pose
+        target_pose = new_position + new_orientation
+        
+        # Data validation
+        pose_ok, pose_msg = self.safety_checker.validate_pose_data(target_pose)
+        if not pose_ok:
+            print(pose_msg)
+            RobotError.log_error(self.log_file, 'E401', pose_msg)
+            self.failed_commands += 1
+            return False
+        
+        # Kinematic checks
+        if not self.simulate and self.rtde_r:
+            limits_ok, limits_msg = self.safety_checker.check_joint_limits(target_pose)
+            if not limits_ok:
+                if self.total_commands_sent % 50 == 0:
+                    print(limits_msg)
+                self.failed_commands += 1
+                return False
+            
+            singular_ok, singular_msg = self.safety_checker.check_singularity_proximity(target_pose)
+            if not singular_ok:
+                if self.total_commands_sent % 50 == 0:
+                    print(singular_msg)
+                self.failed_commands += 1
+                return False
+        
+        # Update target
+        self.target_tcp_pose = target_pose
+        
+        # Apply velocity scaling
+        scaled_velocity = UR_MAX_VELOCITY * velocity_scale
+        scaled_acceleration = UR_MAX_ACCELERATION * velocity_scale
+        
+        # Log command
+        pose_str = "[" + ", ".join([f"{x:.4f}" for x in target_pose]) + "]"
+        
+        if self.blend_mode:
+            command = f"servoL({pose_str}, vel={scaled_velocity:.3f}, acc={scaled_acceleration:.3f})"
+        else:
+            command = f"moveL({pose_str}, vel={scaled_velocity:.3f}, acc={scaled_acceleration:.3f})"
+        
+        self.log_command(command)
+        
+        if self.simulate:
+            self.successful_commands += 1
+            return True
+        
+        if not self.enabled or not self.rtde_c:
+            self.failed_commands += 1
+            return False
+        
+        # Execute command
+        try:
+            if self.blend_mode:
+                success = self.rtde_c.servoL(target_pose, scaled_velocity, scaled_acceleration)
+            else:
+                success = self.rtde_c.moveL(target_pose, scaled_velocity, scaled_acceleration)
+            
+            if success:
+                self.successful_commands += 1
+            else:
+                self.failed_commands += 1
+            
+            return success
+            
+        except Exception as e:
+            self.log_command(f"# ERROR: {e}")
+            print(f"RTDE command error: {e}")
+            self.connection_lost = True
+            self.failed_commands += 1
+            return False
+    
+    def emergency_stop(self):
+        """Emergency stop robot"""
+        if self.enabled and self.rtde_c:
+            try:
+                self.rtde_c.stopL(10.0)
+                print("EMERGENCY STOP EXECUTED")
+            except Exception as e:
+                print(f"Emergency stop error: {e}")
+        self.log_command("# EMERGENCY STOP")
+    
+    def reset_to_home(self):
+        """Reset robot to home position (Neutral/Bent arm)"""
+        # We don't update target_tcp_pose here because we are doing a joint move
+        # The update_robot_status() loop will pick up the new TCP pose once moved
+        if self.enabled and not self.simulate and self.rtde_c:
+            try:
+                # Use moveJ to go to neutral joint positions
+                # Speed=0.6 rad/s, Accel=0.6 rad/s^2 (Safe, controlled speed)
+                from config.constants import UR_NEUTRAL_JOINT_POSITIONS
+                self.rtde_c.moveJ(UR_NEUTRAL_JOINT_POSITIONS, 0.6, 0.6)
+                print("Robot moving to neutral home position")
+            except Exception as e:
+                print(f"Reset to home error: {e}")
+
+        self.log_command("# Reset to home")
+    
+    def get_status_display(self):
+        """Get formatted status for display"""
+        return {
+            'robot_status': self.robot_status_text,
+            'tcp_pose': self.current_tcp_pose,
+            'joint_angles': [math.degrees(j) for j in self.last_joint_positions],
+            'target_velocity': self.current_velocity_scale,
+            'blend_mode': 'SMOOTH' if self.blend_mode else 'STOP-MOVE',
+            'connection_lost': self.connection_lost,
+            'reconnect_attempts': self.reconnect_attempts,
+            'total_commands': self.total_commands_sent,
+            'success_rate': (self.successful_commands / self.total_commands_sent * 100) if self.total_commands_sent > 0 else 0
+        }
+    
+    def move_speed(self, linear_velocity, angular_velocity, acceleration=0.5):
+        """
+        Execute velocity control command (speedL)
+        
+        Args:
+            linear_velocity: [vx, vy, vz] in m/s
+            angular_velocity: [rx, ry, rz] in rad/s
+            acceleration: Acceleration in m/s^2 (default 0.5)
+        
+        Returns:
+            True if successful, False otherwise
+        """
+        current_time = time.time()
+        
+        # Rate limiting (125Hz max for RTDE)
+        if current_time - self.last_command_time < RTDE_MAX_FREQUENCY:
+            return False
+        
+        # Combine into 6D vector
+        velocity_vector = list(linear_velocity) + list(angular_velocity)
+        
+        # 1. Threshold Check (Suppression)
+        # Always allow stopping (zero velocity) if we were moving
+        is_zero = all(v == 0 for v in velocity_vector)
+        was_moving = self.last_sent_velocity is not None and any(v != 0 for v in self.last_sent_velocity)
+        
+        if self.last_sent_velocity is not None and not (is_zero and was_moving):
+            # Calculate max change across all axes
+            max_delta = max(abs(v1 - v2) for v1, v2 in zip(velocity_vector, self.last_sent_velocity))
+            if max_delta < self.VEL_DELTA_THRESHOLD:
+                return True # Suppress but return success
+        
+        # 2. Update state and timing
+        self.last_sent_velocity = velocity_vector[:]
+        self.last_command_time = current_time
+        self.total_commands_sent += 1
+        
+        # Log command (sample every 10 to avoid spamming log)
+        if self.total_commands_sent % 10 == 0:
+            vel_str = "[" + ", ".join([f"{x:.4f}" for x in velocity_vector]) + "]"
+            self.log_command(f"speedL({vel_str}, acc={acceleration:.2f})")
+        
+        if self.simulate:
+            self.successful_commands += 1
+            return True
+        
+        if not self.enabled or not self.rtde_c:
+            self.failed_commands += 1
+            return False
+        
+        try:
+            # speedL(xd, a, t, aRot)
+            # xd: tool speed [m/s, rad/s]
+            # a: tool position acceleration [m/s^2]
+            # t: time [s] - set to 0.008 for real-time
+            success = self.rtde_c.speedL(velocity_vector, acceleration, 0.008)
+            
+            if success:
+                self.successful_commands += 1
+            else:
+                self.failed_commands += 1
+            
+            return success
+            
+        except Exception as e:
+            self.log_command(f"# ERROR: {e}")
+            print(f"RTDE speedL error: {e}")
+            self.connection_lost = True
+            self.failed_commands += 1
+            return False
+            
+    def move_servo(self, target_pose, velocity=0.5, acceleration=0.5, lookahead_time=0.1, gain=300):
+        """
+        Execute servo command (servoL) to a specific target pose
+        
+        Args:
+            target_pose: Target pose [x, y, z, rx, ry, rz]
+            velocity: Velocity limit (default 0.5)
+            acceleration: Acceleration limit (default 0.5)
+            lookahead_time: Lookahead time (default 0.1)
+            gain: Proportional gain (default 300)
+        
+        Returns:
+            True if successful, False otherwise
+        """
+        current_time = time.time()
+        
+        # Rate limiting (125Hz max for RTDE)
+        # 1. Threshold Check (Suppression)
+        if self.last_sent_pose is not None:
+            # list conversion for math safety
+            target_pose = list(target_pose)
+            pos_delta = math.sqrt(sum((a - b)**2 for a, b in zip(target_pose[:3], self.last_sent_pose[:3])))
+            orient_delta = math.sqrt(sum((a - b)**2 for a, b in zip(target_pose[3:6], self.last_sent_pose[3:6])))
+            
+            if pos_delta < self.POSE_DELTA_THRESHOLD and orient_delta < self.ORIENT_DELTA_THRESHOLD:
+                return True # Suppress jittery updates
+        
+        # 2. Update state and timing
+        self.last_sent_pose = list(target_pose)
+        self.last_command_time = current_time
+        self.total_commands_sent += 1
+        
+        # Validate target pose
+        pose_ok, pose_msg = self.safety_checker.validate_pose_data(target_pose)
+        if not pose_ok:
+            if self.total_commands_sent % 100 == 0:
+                print(pose_msg)
+            self.failed_commands += 1
+            return False
+            
+        # Kinematic checks
+        if not self.simulate and self.rtde_r:
+            limits_ok, limits_msg = self.safety_checker.check_joint_limits(target_pose)
+            if not limits_ok:
+                if self.total_commands_sent % 50 == 0:
+                    print(limits_msg)
+                self.failed_commands += 1
+                return False
+        
+        # Update target state
+        self.target_tcp_pose = target_pose
+        
+        # Log command (sample)
+        if self.total_commands_sent % 10 == 0:
+            pose_str = "[" + ", ".join([f"{x:.3f}" for x in target_pose]) + "]"
+            self.log_command(f"servoL({pose_str}, t={lookahead_time}, g={gain})")
+        
+        if self.simulate:
+            self.successful_commands += 1
+            return True
+        
+        if not self.enabled or not self.rtde_c:
+            self.failed_commands += 1
+            return False
+        
+        try:
+            # servoL(pose, vel, acc, time, lookahead_time, gain)
+            # time: time where the command is controlling the robot. The function is blocking for this time.
+            # We set time=0.008 to match our loop rate (non-blocking effectively)
+            success = self.rtde_c.servoL(target_pose, velocity, acceleration, 0.008, lookahead_time, gain)
+            
+            if success:
+                self.successful_commands += 1
+            else:
+                self.failed_commands += 1
+            
+            return success
+            
+        except Exception as e:
+            self.log_command(f"# ERROR: {e}")
+            print(f"RTDE servoL error: {e}")
+            self.connection_lost = True
+            self.failed_commands += 1
+            return False
+
+    def move_gripper(self, position, speed=255, force=255):
+        """
+        Move Robotiq gripper to position (0-255)
+        
+        Args:
+            position: Target position (0=Open, 255=Closed)
+            speed: Movement speed (0-255)
+            force: Gripping force (0-255)
+        """
+        if not self.enabled or self.simulate or not self.gripper:
+            return False
+            
+        try:
+            self.gripper.move(position, speed, force)
+            return True
+        except Exception as e:
+            print(f"⚠️ Gripper error: {e}")
+            return False
+
+    def get_statistics(self):
+        """Get performance statistics"""
+        success_rate = (self.successful_commands / self.total_commands_sent * 100) if self.total_commands_sent > 0 else 0
+        return {
+            'total': self.total_commands_sent,
+            'successful': self.successful_commands,
+            'failed': self.failed_commands,
+            'success_rate': success_rate
+        }
+    
+    def close(self):
+        """Close connections and log file"""
+        if self.rtde_c:
+            try:
+                self.rtde_c.disconnect()
+            except:
+                pass
+        if self.rtde_r:
+            try:
+                self.rtde_r.disconnect()
+            except:
+                pass
+        if self.log_file and not self.log_file.closed:
+            stats = self.get_statistics()
+            self.log_file.write(f"\n# Session Statistics:\n")
+            self.log_file.write(f"# Total commands: {stats['total']}\n")
+            self.log_file.write(f"# Successful: {stats['successful']}\n")
+            self.log_file.write(f"# Failed: {stats['failed']}\n")
+            self.log_file.write(f"# Success rate: {stats['success_rate']:.1f}%\n")
+            self.log_file.close()
+            print(f"Session stats: {stats['total']} commands, {stats['success_rate']:.1f}% success rate")

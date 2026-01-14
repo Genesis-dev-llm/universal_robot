@@ -1,0 +1,465 @@
+"""
+Universal Robot RTDE Control with Wearable IMU
+Main Application Entry Point - Refactored and Modular
+
+Author: Refactored Version
+Date: 2025
+"""
+
+import pygame
+from pygame.locals import *
+from OpenGL.GL import *
+from OpenGL.GLU import *
+import numpy as np
+import time
+import sys
+import traceback
+import math
+
+# Import configuration
+from config.constants import *
+from config.config_manager import ConfigManager, RuntimeConfig
+
+# Import core modules
+from core.error_handler import RobotError
+from core.imu_calibration import IMUCalibration
+from core.event_handler import EventHandler
+from core.math_utils import apply_deadzone_ramp, quaternion_normalize, apply_axis_mapping, apply_axis_mapping_quat
+
+# Import communication
+from communication.imu_interface import IMUInterface
+from communication.data_parser import IMUDataParser
+
+# Import robot control
+from robot.rtde_controller import RTDEController
+from robot.control_modes import ControlModeDispatcher
+
+# Import visualization
+from visualization.scene_renderer import SceneRenderer
+from visualization.gui_overlay import GUIOverlay
+from visualization.graph_renderer import GraphRenderer
+
+#==============================================================================
+# VISUALIZATION STATE
+#==============================================================================
+
+class VisualizationState:
+    """
+    Manages 3D visualization state (cube position, velocity, etc.)
+    """
+    
+    def __init__(self):
+        self.position = np.array([0.0, -1.0, 0.0])
+        self.rotation_quat = np.array([0.0, 0.0, 0.0, 1.0])
+        self.velocity = np.array([0.0, 0.0, 0.0])
+        self.is_active = False
+        self.current_mode = 0
+        self.last_mode = -1
+        self.visualizer_mode = 'CUBE' # 'CUBE' or 'ROBOT'
+        self.flex_value = 0 # 0-255 scale
+    
+    def update_from_imu(self, imu_data, runtime_config):
+        """
+        Update visualization based on IMU data
+        
+        Args:
+            imu_data: Dictionary with 'quaternion', 'euler', 'mode'
+            runtime_config: RuntimeConfig instance
+        """
+        self.is_active = True
+        self.current_mode = imu_data['mode']
+        self.flex_value = imu_data.get('flex', 0)
+        
+        # Update rotation from quaternion (with axis mapping)
+        raw_quat = quaternion_normalize(imu_data['quaternion'])
+        self.rotation_quat = apply_axis_mapping_quat(raw_quat, IMU_AXIS_MAPPING)
+        
+        # Extract Euler angles
+        rel_roll, rel_pitch, rel_yaw = imu_data['euler']
+        
+        # Apply deadzone to all axes
+        ramped_roll = apply_deadzone_ramp(rel_roll, MOVEMENT_DEADZONE, DEADZONE_RAMP_WIDTH)
+        ramped_pitch = apply_deadzone_ramp(rel_pitch, MOVEMENT_DEADZONE, DEADZONE_RAMP_WIDTH)
+        ramped_yaw = apply_deadzone_ramp(rel_yaw, MOVEMENT_DEADZONE, DEADZONE_RAMP_WIDTH)
+        
+        # Apply axis mapping (see config/constants.py IMU_AXIS_MAPPING)
+        mapped = apply_axis_mapping(ramped_roll, ramped_pitch, ramped_yaw, IMU_AXIS_MAPPING)
+        
+        # Reset velocity for rotational modes
+        if self.current_mode in [3, 6]:
+            if self.last_mode not in [3, 6]:
+                self.velocity = np.array([0.0, 0.0, 0.0])
+            self.velocity *= (VELOCITY_DECAY - 0.15)
+        
+        # Update velocity based on mode using MAPPED axes
+        if self.current_mode == 1:  # BASE_FRAME_XY
+            self.velocity[0] += mapped['x'] * 0.001 * runtime_config.LINEAR_SPEED_SCALE
+            self.velocity[2] += mapped['y'] * 0.001 * runtime_config.LINEAR_SPEED_SCALE
+        elif self.current_mode == 2:  # VERTICAL_Z
+            self.velocity[1] += mapped['z'] * 0.001 * runtime_config.LINEAR_SPEED_SCALE
+        elif self.current_mode == 4:  # TCP_XY
+            self.velocity[0] += mapped['x'] * 0.0005 * runtime_config.LINEAR_SPEED_SCALE
+            self.velocity[2] += mapped['y'] * 0.0005 * runtime_config.LINEAR_SPEED_SCALE
+        elif self.current_mode == 5:  # TCP_Z
+            self.velocity[1] += mapped['z'] * 0.0005 * runtime_config.LINEAR_SPEED_SCALE
+    
+    def update_physics(self):
+        """Update physics simulation"""
+        self.position += self.velocity
+        self.velocity *= VELOCITY_DECAY
+    
+    def reset(self):
+        """Reset to initial state"""
+        self.position = np.array([0.0, -1.0, 0.0])
+        self.rotation_quat = np.array([0.0, 0.0, 0.0, 1.0])
+        self.velocity = np.array([0.0, 0.0, 0.0])
+        self.is_active = False
+        self.current_mode = 0
+        self.last_mode = -1
+    
+    def get_color_multiplier(self, runtime_config, rtde_enabled):
+        """Get color multiplier based on mode and state"""
+        if not self.is_active or self.current_mode == 0:
+            return (0.5, 0.5, 0.5)  # Gray for idle
+        
+        mode_colors = {
+            1: (1.0, 0.3, 0.3),  # Red - BASE_FRAME_XY
+            2: (0.3, 1.0, 0.3),  # Green - VERTICAL_Z
+            3: (1.0, 1.0, 0.3),  # Yellow - BASE_FRAME_ORIENT
+            4: (0.3, 0.3, 1.0),  # Blue - TCP_XY
+            5: (1.0, 0.3, 1.0),  # Magenta - TCP_Z
+            6: (0.3, 1.0, 1.0)   # Cyan - TCP_ORIENT
+        }
+        
+        base_color = mode_colors.get(self.current_mode, (1.0, 1.0, 1.0))
+        
+        if rtde_enabled:
+            if self.current_mode in [1, 3] and not runtime_config.ENABLE_REMAPPED_MODES:
+                return tuple(c * 0.3 for c in base_color)  # Dim if disabled
+            else:
+                return base_color
+        else:
+            return tuple(c * 0.6 for c in base_color)  # Dim if robot disabled
+
+#==============================================================================
+# STATUS BUILDER
+#==============================================================================
+
+class StatusBuilder:
+    """
+    Builds status text for display
+    """
+    
+    @staticmethod
+    def build_status_lines(vis_state, rtde_controller, imu_calibration, 
+                          runtime_config, control_dispatcher):
+        """
+        Build list of status lines for display
+        
+        Returns:
+            List of status strings
+        """
+        status = rtde_controller.get_status_display()
+        remap_status = "ENABLED" if runtime_config.ENABLE_REMAPPED_MODES else "DISABLED"
+        mode_name = control_dispatcher.get_mode_name(vis_state.current_mode)
+        
+        status_lines = [
+            f"Mode: {mode_name} | {status.get('robot_status', 'N/A')} | IMU: {imu_calibration.get_status()}",
+            f"Speed: {status.get('target_velocity', 0.0) * 100:.0f}% | Lin Scale: {runtime_config.LINEAR_SPEED_SCALE:.1f}x | Ang Scale: {runtime_config.ANGULAR_SPEED_SCALE:.1f}x"
+        ]
+        
+        if status.get('connection_lost'):
+            status_lines.append(f"WARNING: Connection Lost - Reconnect: {status.get('reconnect_attempts', 0)}/5")
+        
+        if imu_calibration.calibration_active:
+            status_lines.append(f"CALIBRATION ACTIVE - Step {imu_calibration.calibration_step + 1}/2")
+        
+        # Add Gripper status
+        flex_pct = (vis_state.flex_value / 255.0) * 100
+        status_lines.append(f"Gripper: {flex_pct:.0f}% ({'CLOSED' if flex_pct > 80 else 'OPEN' if flex_pct < 20 else 'MOVING'})")
+        
+        return status_lines
+
+#==============================================================================
+# MAIN APPLICATION
+#==============================================================================
+
+def print_startup_info(config_manager, imu_calibration, imu_interface, runtime_config):
+    """Print startup information"""
+    config_manager.print_summary()
+    
+    print("\nIMU Calibration Status:")
+    print(f"  Status: {imu_calibration.get_status()}")
+    if imu_calibration.is_calibrated:
+        print(f"  Roll offset: {imu_calibration.zero_offsets['roll']:.2f}°")
+        print(f"  Pitch offset: {imu_calibration.zero_offsets['pitch']:.2f}°")
+        print(f"  Yaw offset: {imu_calibration.zero_offsets['yaw']:.2f}°")
+    print()
+    
+    print("="*70)
+    print("UNIVERSAL ROBOT RTDE + IMU CONTROL SYSTEM")
+    print("="*70)
+    print(f"Communication: {imu_interface.get_mode()}")
+    print(f"Robot IP: {UR_ROBOT_IP}")
+    print(f"Robot Control: {'ENABLED' if UR_ENABLED else 'DISABLED'}")
+    print(f"Simulation Mode: {'ON' if UR_SIMULATE else 'OFF (REAL ROBOT)'}")
+    print(f"Remapped Modes: {'ENABLED' if runtime_config.ENABLE_REMAPPED_MODES else 'DISABLED (SAFETY)'}")
+    print("\nControl Modes:")
+    for mode_num, mode_name in CONTROL_MODES.items():
+        if mode_num == 0:
+            continue
+        status = ""
+        if mode_num in [1, 3] and not runtime_config.ENABLE_REMAPPED_MODES:
+            status = " [DISABLED - Press M to enable]"
+        print(f"  Mode {mode_num}: {mode_name}{status}")
+    print(" Controls: [TAB] View | [R] Reset | [U] Robot Power | [S] Stop | [C] Save Config")
+    print("           [Arrows] Speed | [Shift+C] Calibrate")
+    print("="*70 + "\n")
+
+def main():
+    """Main application loop"""
+    
+    # Initialize configuration
+    print("Initializing configuration...")
+    config_manager = ConfigManager()
+    runtime_config = RuntimeConfig(config_manager)
+    imu_calibration = IMUCalibration(config_manager)
+    
+    # Initialize PyGame and OpenGL
+    print("Initializing graphics...")
+    pygame.init()
+    display_width = config_manager.get('visualization', 'window_width', DEFAULT_WINDOW_WIDTH)
+    display_height = config_manager.get('visualization', 'window_height', DEFAULT_WINDOW_HEIGHT)
+    display = (display_width, display_height)
+    
+    try:
+        screen = pygame.display.set_mode(display, DOUBLEBUF | OPENGL)
+    except Exception as e:
+        print(f"ERROR: Could not initialize display: {e}")
+        return
+    
+    pygame.display.set_caption("UR Robot RTDE + IMU Control")
+    glEnable(GL_DEPTH_TEST)
+    glClearColor(0.1, 0.1, 0.15, 1.0)
+    
+    # Setup camera
+    camera_distance = config_manager.get('visualization', 'camera_distance', DEFAULT_CAMERA_DISTANCE)
+    gluPerspective(45, (display[0] / display[1]), 0.1, 50.0)
+    glTranslatef(0.0, 0.0, -camera_distance)
+    
+    # Initialize visualization
+    vis_state = VisualizationState()
+    # Initialize static resources and models
+    SceneRenderer.initialize()
+    scene_renderer = SceneRenderer()
+    gui_overlay = GUIOverlay()
+    
+    # Initialize RTDE Controller
+    print("Initializing RTDE controller...")
+    rtde_controller = RTDEController(UR_ROBOT_IP, UR_ENABLED, UR_SIMULATE, config_manager)
+    
+    # Initialize control mode dispatcher
+    control_dispatcher = ControlModeDispatcher(rtde_controller)
+    
+    # Initialize Graphs
+    graph_width = 210
+    graph_height = 80
+    graph_x = display_width - 220
+    graph_y_start = 180 # Below speed indicators
+    
+    lin_vel_graph = GraphRenderer("Linear Vel (m/s)", graph_x, graph_y_start, 
+                                 graph_width, graph_height, color=(0, 255, 0), y_range=(0, 0.5))
+                                 
+    ang_vel_graph = GraphRenderer("Angular Vel (rad/s)", graph_x, graph_y_start + graph_height + 20, 
+                                 graph_width, graph_height, color=(255, 255, 0), y_range=(0, 1.0))
+    
+    # Initialize IMU communication
+    imu_interface = IMUInterface(USE_WIFI, SERIAL_PORT, BAUD_RATE, WIFI_HOST, WIFI_PORT)
+    if not imu_interface.connect():
+        return
+    
+    # Initialize event handler
+    event_handler = EventHandler(config_manager, runtime_config, imu_calibration, rtde_controller, vis_state, control_dispatcher)
+    
+    # Print startup info
+    print_startup_info(config_manager, imu_calibration, imu_interface, runtime_config)
+    
+    # Main loop
+    clock = pygame.time.Clock()
+    frame_count = 0
+    last_fps_print = time.time()
+    
+    try:
+        running = True
+        while running:
+            frame_count += 1
+            
+            # Print FPS every 5 seconds
+            if frame_count % 625 == 0:
+                current_time = time.time()
+                elapsed = current_time - last_fps_print
+                fps = 625 / elapsed if elapsed > 0 else 0
+                stats = rtde_controller.get_statistics()
+                print(f"FPS: {fps:.1f} | Commands: {rtde_controller.total_commands_sent} | Success: {stats['success_rate']:.1f}%")
+                last_fps_print = current_time
+            
+            # Handle events
+            running = event_handler.handle_events()
+            if not running:
+                break
+            
+            # Read IMU data
+            line = imu_interface.read_line()
+            imu_data = IMUDataParser.parse_line(line, rtde_controller.log_file)
+            
+            # Process IMU data
+            if imu_data:
+                # Apply calibration to IMU data
+                calibrated_euler = imu_calibration.apply_calibration(*imu_data['euler'])
+                imu_data['euler'] = np.array(calibrated_euler)
+                imu_data['quaternion'] = imu_calibration.apply_calibration_quat(imu_data['quaternion'])
+                
+                # Capture calibration samples if active
+                if imu_calibration.calibration_active:
+                    imu_calibration.capture_calibration_sample(*calibrated_euler)
+                
+                # Update visualization
+                vis_state.update_from_imu(imu_data, runtime_config)
+                
+                # Mode transition handling
+                if imu_data['mode'] != vis_state.last_mode:
+                    if vis_state.last_mode > 0 and imu_data['mode'] > 0:
+                        if rtde_controller.enabled and rtde_controller.rtde_c and not rtde_controller.simulate:
+                            try:
+                                rtde_controller.rtde_c.stopL(2.0)
+                                time.sleep(0.05)
+                            except:
+                                pass
+                    
+                    if imu_data['mode'] != 0:
+                        mode_name = control_dispatcher.get_mode_name(imu_data['mode'])
+                        print(f"Mode: {mode_name}")
+                        rtde_controller.log_command(f"# Mode: {mode_name}")
+                    
+                    vis_state.last_mode = imu_data['mode']
+                
+                # Execute robot control
+                if rtde_controller.enabled:
+                    control_dispatcher.execute_mode(imu_data['mode'], imu_data, runtime_config)
+            
+            else:
+                # No IMU data - decay velocity
+                vis_state.is_active = False
+                if vis_state.last_mode > 0:
+                    vis_state.velocity *= (VELOCITY_DECAY - 0.1)
+                    vis_state.last_mode = 0
+            
+            # Update physics
+            vis_state.update_physics()
+            
+            # Update robot status
+            rtde_controller.update_robot_status()
+            
+            # Check connection health
+            if rtde_controller.enabled and rtde_controller.connection_lost:
+                if rtde_controller.attempt_reconnect():
+                    print("Robot reconnected successfully")
+            
+            # 3D rendering
+            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+            
+            # Draw scene
+            glPushMatrix()
+            scene_renderer.draw_grid()
+            scene_renderer.draw_axes()
+            scene_renderer.draw_workspace_limit()
+            glPopMatrix()
+            
+            # Dual-mode rendering
+            if vis_state.visualizer_mode == 'ROBOT':
+                # Draw Robot Model
+                # If connected, use actual joint angles. If simulation, use last known (or home)
+                joint_angles = rtde_controller.last_joint_positions
+                glPushMatrix()
+                scene_renderer.draw_robot(joint_angles)
+                glPopMatrix()
+                
+                # Draw ghost TCP for debugging
+                scene_renderer.render_cube_at_pose(
+                    rtde_controller.current_tcp_pose[:3],
+                    [0, 0, 0, 1], # rotation not visualized here
+                    color_multiplier=(0.2, 1.0, 0.2) # Transparent green ghost
+                )
+            else:
+                # Draw Cube (IMU orientation)
+                color_multiplier = vis_state.get_color_multiplier(runtime_config, rtde_controller.enabled)
+                scene_renderer.render_cube_at_pose(vis_state.position, vis_state.rotation_quat, color_multiplier)
+            
+            # 2D GUI overlay
+            gui_overlay.setup_2d_projection(display)
+            
+            # Draw speed indicators
+
+            
+            # Draw status text
+            status_lines = StatusBuilder.build_status_lines(
+                vis_state, rtde_controller, imu_calibration, runtime_config, control_dispatcher)
+            gui_overlay.draw_status_text(status_lines, display)
+            
+
+            
+            # Render and update Graphs
+            # Get velocity magnitude
+            current_lin_speed = np.linalg.norm(control_dispatcher.current_velocity)
+            current_ang_speed = np.linalg.norm(control_dispatcher.current_angular_velocity)
+            
+            lin_vel_graph.add_value(current_lin_speed)
+            ang_vel_graph.add_value(current_ang_speed)
+            
+            lin_vel_graph.render()
+            ang_vel_graph.render()
+            
+            gui_overlay.restore_3d_projection()
+            
+            pygame.display.flip()
+            clock.tick(TARGET_FPS)
+    
+    except KeyboardInterrupt:
+        print("\n\nShutdown requested by user...")
+    except Exception as e:
+        print(f"\n\nFATAL ERROR: {e}")
+        traceback.print_exc()
+    finally:
+        print("\nClosing connections...")
+        # Save final speed settings
+        config_manager.set(runtime_config.LINEAR_SPEED_SCALE, 'speed_scaling', 'linear_scale')
+        config_manager.set(runtime_config.ANGULAR_SPEED_SCALE, 'speed_scaling', 'angular_scale')
+        config_manager.save_config()
+        
+        rtde_controller.close()
+        imu_interface.close()
+        pygame.quit()
+        
+        print("System shutdown complete.")
+        print("\nSession Summary:")
+        stats = rtde_controller.get_statistics()
+        print(f"  Total commands: {stats['total']}")
+        print(f"  Successful: {stats['successful']}")
+        print(f"  Failed: {stats['failed']}")
+        print(f"  Success rate: {stats['success_rate']:.1f}%")
+
+#==============================================================================
+# PROGRAM ENTRY POINT
+#==============================================================================
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n\nProgram terminated by user (Ctrl+C)")
+        sys.exit(0)
+    except Exception as e:
+        print(f"\n\nFATAL ERROR: {e}")
+        traceback.print_exc()
+        print("\nCheck log files for details.")
+        sys.exit(1)

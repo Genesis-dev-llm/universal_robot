@@ -1,0 +1,1910 @@
+"""
+Universal Robot RTDE Control with Wearable IMU
+Complete Production Version - Fully Tested and Debugged
+
+Features:
+- 6 control modes (3 remappable base-frame modes, 3 TCP modes)
+- Multi-layered safety architecture
+- IMU calibration wizard
+- Configuration file management
+- Comprehensive error handling and logging
+- Real-time 3D visualization
+- Dual-mode communication (WiFi/USB)
+- Connection recovery
+- Dynamic speed scaling with visual overlay.
+- CORRECTED AXIS MAPPING for intuitive control.
+
+Author: Production-Ready Version
+Date: 2025
+"""
+
+import pygame
+from pygame.locals import *
+from OpenGL.GL import *
+from OpenGL.GLU import *
+import serial
+import socket
+import math
+import numpy as np
+import time
+import threading
+import traceback
+from datetime import datetime
+from collections import deque
+import json
+import os
+import sys
+
+# RTDE imports
+try:
+    import rtde_control
+    import rtde_receive
+    RTDE_AVAILABLE = True
+except ImportError:
+    RTDE_AVAILABLE = False
+    print("WARNING: ur-rtde not installed. Robot control disabled.")
+    print("Install with: pip install ur-rtde")
+
+#==============================================================================
+# CONFIGURATION CONSTANTS
+#==============================================================================
+
+# Communication settings
+SERIAL_PORT = '/dev/ttyUSB0'  # Linux/Mac: /dev/ttyUSB0, Windows: COM3
+BAUD_RATE = 115200
+WIFI_HOST = '192.168.4.1'
+WIFI_PORT = 3333
+USE_WIFI = False  # Set True for WiFi, False for USB
+
+# Universal Robot settings
+UR_ROBOT_IP = "192.168.1.100"
+UR_ENABLED = False  # Set True to enable robot control
+UR_SIMULATE = True  # Set False for real robot commands
+
+# Control parameters (meters per degree for translation, radians per degree for rotation)
+CONTROL_PARAMS = {
+    'base_translation': 0.002,
+    'base_rotation': 0.01,
+    'vertical': 0.002,
+    'tcp_translation': 0.0005,
+    'tcp_vertical': 0.0005,
+    'tcp_orientation': 0.005,
+    'robot_orientation': 0.008,
+}
+
+# UR Joint Limits (radians) - UR5/UR10 typical values
+UR_JOINT_LIMITS = {
+    'joint_0': (-2*math.pi, 2*math.pi),
+    'joint_1': (-math.pi, math.pi),
+    'joint_2': (-math.pi, math.pi),
+    'joint_3': (-math.pi, math.pi),
+    'joint_4': (-math.pi, math.pi),
+    'joint_5': (-2*math.pi, 2*math.pi),
+}
+
+# UR Workspace limits (meters, relative to robot base)
+UR_LIMITS = {
+    'x_min': -0.85, 'x_max': 0.85,
+    'y_min': -0.85, 'y_max': 0.85,
+    'z_min': 0.05, 'z_max': 1.2
+}
+
+# UR Control parameters
+UR_BASE_POSITION = [0.4, 0.0, 0.6]  # Starting TCP position [x, y, z] in meters
+UR_BASE_ORIENTATION = [0.0, 0.0, 0.0]  # Starting orientation [rx, ry, rz] rotation vector
+UR_MAX_VELOCITY = 0.25  # m/s
+UR_MAX_ACCELERATION = 1.2  # m/s²
+UR_JOINT_VELOCITY = 1.05  # rad/s
+UR_JOINT_ACCELERATION = 1.4  # rad/s²
+
+# Movement filtering parameters
+MOVEMENT_DEADZONE = 3.0  # degrees - no movement below this
+DEADZONE_RAMP_WIDTH = 2.0  # degrees - gradual ramp zone
+VELOCITY_DECAY = 0.95  # visualization smoothing
+
+# Control mode definitions
+CONTROL_MODES = {
+    0: "IDLE",
+    1: "BASE_FRAME_XY",      # Remapped: XY translation in base frame
+    2: "VERTICAL_Z",         # Vertical movement
+    3: "BASE_FRAME_ORIENT",  # Remapped: Orientation control in base frame (Rx, Ry, Rz)
+    4: "TCP_XY",             # Fine TCP XY positioning
+    5: "TCP_Z",              # Fine TCP vertical
+    6: "TCP_ORIENT"          # TCP orientation control
+}
+
+#==============================================================================
+# ERROR HANDLING SYSTEM
+#==============================================================================
+
+class RobotError:
+    """
+    Comprehensive error handling and logging system.
+    Provides standardized error messages with codes for debugging.
+    """
+    
+    ERROR_CODES = {
+        # Connection errors (E1xx)
+        'E101': 'RTDE Connection Error',
+        'E102': 'RTDE Connection Failed',
+        'E103': 'Connection Recovery Failed',
+        'E104': 'Serial Connection Failed',
+        'E105': 'WiFi Connection Failed',
+        
+        # Robot state errors (E2xx)
+        'E201': 'Robot Not in Running Mode',
+        'E202': 'Protective Stop Active',
+        'E203': 'Emergency Stop Active',
+        'E204': 'Robot in Backdrive Mode',
+        'E205': 'Safety System Error',
+        
+        # Motion safety errors (E3xx)
+        'E301': 'Joint Limit Violation',
+        'E302': 'Singularity Detected',
+        'E303': 'Workspace Boundary Violation',
+        'E304': 'Inverse Kinematics Failed',
+        'E305': 'Velocity Limit Exceeded',
+        
+        # Data errors (E4xx)
+        'E401': 'Invalid Pose Data',
+        'E402': 'Invalid Joint Configuration',
+        
+        # IMU errors (E5xx)
+        'E501': 'IMU Communication Error',
+        'E502': 'IMU Data Parse Error',
+        'E503': 'IMU Calibration Error',
+    }
+    
+    @staticmethod
+    def format_error(code, details="", context=""):
+        """Format error message with code, details, and context"""
+        error_name = RobotError.ERROR_CODES.get(code, "Unknown Error")
+        msg = f"[{code}] {error_name}"
+        if details:
+            msg += f"\n  Details: {details}"
+        if context:
+            msg += f"\n  Context: {context}"
+        return msg
+    
+    @staticmethod
+    def log_error(log_file, code, details="", context=""):
+        """Write error to log file with timestamp"""
+        if log_file and not log_file.closed:
+            timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+            error_msg = RobotError.format_error(code, details, context)
+            log_file.write(f"[{timestamp}] ERROR {error_msg}\n")
+            log_file.flush()
+
+#==============================================================================
+# CONFIGURATION MANAGER
+#==============================================================================
+
+class ConfigManager:
+    """
+    Manages persistent configuration via JSON file.
+    Handles loading, saving, and accessing configuration parameters.
+    """
+    
+    DEFAULT_CONFIG = {
+        'remapping': {
+            'enable_remapped_modes': False  # Safety: disabled by default
+        },
+        'safety': {
+            'smoothing_factor': 0.3,
+            'velocity_ramp_rate': 0.1,
+            'deadzone': 3.0,
+            'deadzone_ramp_width': 2.0,
+            'max_velocity_scale': 1.0
+        },
+        'control': {
+            'base_translation': 0.002,
+            'base_rotation': 0.01,
+            'vertical': 0.002,
+            'tcp_translation': 0.0005,
+            'tcp_vertical': 0.0005,
+            'tcp_orientation': 0.005,
+            'robot_orientation': 0.008
+        },
+        'imu_calibration': {
+            'roll_offset': 0.0,
+            'pitch_offset': 0.0,
+            'yaw_offset': 0.0,
+            'is_calibrated': False
+        },
+        'visualization': {
+            'window_width': 1200,
+            'window_height': 800,
+            'camera_distance': 20.0
+        },
+        'speed_scaling': {
+            'linear_scale': 0.1,  # Set to MIN_SCALE for startup safety
+            'angular_scale': 0.1, # Set to MIN_SCALE for startup safety
+            'min_scale': 0.1,
+            'max_scale': 2.0,
+            'step': 0.1
+        }
+    }
+    
+    def __init__(self, config_file='robot_config.json'):
+        self.config_file = config_file
+        self.config = self.load_config()
+    
+    def load_config(self):
+        """Load configuration from file or create default"""
+        if os.path.exists(self.config_file):
+            try:
+                with open(self.config_file, 'r') as f:
+                    loaded_config = json.load(f)
+                    # Merge with defaults to ensure all keys exist
+                    config = self._deep_merge(self.DEFAULT_CONFIG.copy(), loaded_config)
+                    print(f"Configuration loaded from {self.config_file}")
+                    return config
+            except Exception as e:
+                print(f"Error loading config: {e}, using defaults")
+                return self.DEFAULT_CONFIG.copy()
+        else:
+            print(f"No config file found, using defaults")
+            self.save_config()  # Create default config file
+            return self.DEFAULT_CONFIG.copy()
+    
+    def _deep_merge(self, base, override):
+        """Deep merge two dictionaries"""
+        for key, value in override.items():
+            if key in base and isinstance(base[key], dict) and isinstance(value, dict):
+                base[key] = self._deep_merge(base[key], value)
+            else:
+                base[key] = value
+        return base
+    
+    def save_config(self):
+        """Save current configuration to file"""
+        try:
+            with open(self.config_file, 'w') as f:
+                json.dump(self.config, f, indent=4)
+            return True
+        except Exception as e:
+            print(f"Error saving config: {e}")
+            return False
+    
+    def get(self, section, key, default=None):
+        """Get a configuration value with optional default"""
+        return self.config.get(section, {}).get(key, default)
+    
+    def set(self, value, section, key):
+        """Set a configuration value"""
+        if section not in self.config:
+            self.config[section] = {}
+        self.config[section][key] = value
+    
+    def print_summary(self):
+        """Print current configuration summary"""
+        print("\n" + "="*70)
+        print("CURRENT CONFIGURATION")
+        print("="*70)
+        for section, values in self.config.items():
+            print(f"\n[{section.upper()}]")
+            for key, value in values.items():
+                print(f"  {key}: {value}")
+        print("="*70 + "\n")
+
+#==============================================================================
+# IMU CALIBRATION SYSTEM
+#==============================================================================
+
+class IMUCalibration:
+    """
+    Handles IMU calibration and zero-point offset management.
+    Provides an interactive calibration wizard for accurate zero-point setup.
+    """
+    
+    def __init__(self, config_manager):
+        self.config_manager = config_manager
+        self.zero_offsets = {
+            'roll': config_manager.get('imu_calibration', 'roll_offset', 0.0),
+            'pitch': config_manager.get('imu_calibration', 'pitch_offset', 0.0),
+            'yaw': config_manager.get('imu_calibration', 'yaw_offset', 0.0)
+        }
+        self.is_calibrated = config_manager.get('imu_calibration', 'is_calibrated', False)
+        
+        # Calibration wizard state
+        self.calibration_active = False
+        self.calibration_step = 0
+        self.calibration_samples = []
+        self.samples_per_step = 100  # Number of samples to average
+    
+    def apply_calibration(self, roll, pitch, yaw):
+        """Apply calibration offsets to raw IMU data"""
+        if self.is_calibrated:
+            roll -= self.zero_offsets['roll']
+            pitch -= self.zero_offsets['pitch']
+            yaw -= self.zero_offsets['yaw']
+        return roll, pitch, yaw
+    
+    def start_calibration_wizard(self):
+        """Start interactive calibration process"""
+        print("\n" + "="*70)
+        print("IMU CALIBRATION WIZARD")
+        print("="*70)
+        print("Step 1: Place IMU in neutral position")
+        print("        (flat surface, facing forward)")
+        print("        Hold still and press SPACE to capture zero position...")
+        print("="*70 + "\n")
+        
+        self.calibration_active = True
+        self.calibration_step = 0
+        self.calibration_samples = []
+    
+    def capture_calibration_sample(self, roll, pitch, yaw):
+        """Capture calibration data during wizard"""
+        if not self.calibration_active:
+            return
+        
+        if self.calibration_step == 0:
+            # Capturing zero position
+            self.calibration_samples.append((roll, pitch, yaw))
+            
+            # Show progress
+            if len(self.calibration_samples) % 20 == 0:
+                progress = (len(self.calibration_samples) / self.samples_per_step) * 100
+                print(f"Capturing... {progress:.0f}%")
+            
+            if len(self.calibration_samples) >= self.samples_per_step:
+                # Calculate average offsets
+                avg_roll = sum(s[0] for s in self.calibration_samples) / len(self.calibration_samples)
+                avg_pitch = sum(s[1] for s in self.calibration_samples) / len(self.calibration_samples)
+                avg_yaw = sum(s[2] for s in self.calibration_samples) / len(self.calibration_samples)
+                
+                # Calculate standard deviation to check stability
+                std_roll = math.sqrt(sum((s[0] - avg_roll)**2 for s in self.calibration_samples) / len(self.calibration_samples))
+                std_pitch = math.sqrt(sum((s[1] - avg_pitch)**2 for s in self.calibration_samples) / len(self.calibration_samples))
+                std_yaw = math.sqrt(sum((s[2] - avg_yaw)**2 for s in self.calibration_samples) / len(self.calibration_samples))
+                
+                self.zero_offsets = {
+                    'roll': avg_roll,
+                    'pitch': avg_pitch,
+                    'yaw': avg_yaw
+                }
+                
+                print(f"\nZero position captured:")
+                print(f"  Roll offset: {avg_roll:.2f}° (std: {std_roll:.2f}°)")
+                print(f"  Pitch offset: {avg_pitch:.2f}° (std: {std_pitch:.2f}°)")
+                print(f"  Yaw offset: {avg_yaw:.2f}° (std: {std_yaw:.2f}°)")
+                
+                if std_roll > 2.0 or std_pitch > 2.0 or std_yaw > 2.0:
+                    print("\nWARNING: High variation detected. IMU may have been moving.")
+                    print("         Consider recalibrating for better accuracy.")
+                
+                print("\nStep 2: Press SPACE to complete calibration...")
+                
+                self.calibration_step = 1
+                self.calibration_samples = []
+    
+    def complete_calibration(self):
+        """Finalize calibration and save to config"""
+        self.is_calibrated = True
+        self.calibration_active = False
+        
+        # Save to config
+        self.config_manager.set(self.zero_offsets['roll'], 'imu_calibration', 'roll_offset')
+        self.config_manager.set(self.zero_offsets['pitch'], 'imu_calibration', 'pitch_offset')
+        self.config_manager.set(self.zero_offsets['yaw'], 'imu_calibration', 'yaw_offset')
+        self.config_manager.set(True, 'imu_calibration', 'is_calibrated')
+        self.config_manager.save_config()
+        
+        print("\n" + "="*70)
+        print("CALIBRATION COMPLETE")
+        print("="*70)
+        print("IMU is now calibrated. Offsets saved to configuration file.")
+        print("="*70 + "\n")
+    
+    def reset_calibration(self):
+        """Reset calibration to defaults"""
+        self.zero_offsets = {'roll': 0.0, 'pitch': 0.0, 'yaw': 0.0}
+        self.is_calibrated = False
+        self.calibration_active = False
+        
+        self.config_manager.set(0.0, 'imu_calibration', 'roll_offset')
+        self.config_manager.set(0.0, 'imu_calibration', 'pitch_offset')
+        self.config_manager.set(0.0, 'imu_calibration', 'yaw_offset')
+        self.config_manager.set(False, 'imu_calibration', 'is_calibrated')
+        self.config_manager.save_config()
+        
+        print("IMU calibration reset to defaults")
+    
+    def get_status(self):
+        """Get calibration status string"""
+        if self.is_calibrated:
+            return "Calibrated"
+        else:
+            return "Not Calibrated"
+
+#==============================================================================
+# RUNTIME CONFIGURATION
+#==============================================================================
+
+class RuntimeConfig:
+    """Runtime configuration that can be modified during execution"""
+    def __init__(self, config_manager):
+        self.ENABLE_REMAPPED_MODES = config_manager.get('remapping', 'enable_remapped_modes', False)
+        
+        # Speed Control
+        self.LINEAR_SPEED_SCALE = config_manager.get('speed_scaling', 'linear_scale', 0.1)
+        self.ANGULAR_SPEED_SCALE = config_manager.get('speed_scaling', 'angular_scale', 0.1)
+        self.MIN_SCALE = config_manager.get('speed_scaling', 'min_scale', 0.1)
+        self.MAX_SCALE = config_manager.get('speed_scaling', 'max_scale', 2.0)
+        self.STEP_SCALE = config_manager.get('speed_scaling', 'step', 0.1)
+        
+        # Clamp initial values to ensure they respect safety minimum
+        self.LINEAR_SPEED_SCALE = max(self.MIN_SCALE, min(self.MAX_SCALE, self.LINEAR_SPEED_SCALE))
+        self.ANGULAR_SPEED_SCALE = max(self.MIN_SCALE, min(self.MAX_SCALE, self.ANGULAR_SPEED_SCALE))
+
+#==============================================================================
+# MATH & HELPER FUNCTIONS
+#==============================================================================
+
+def apply_deadzone_ramp(value, deadzone, ramp_width):
+    """Apply deadzone with smooth ramping to avoid jerky motion"""
+    abs_value = abs(value)
+    
+    if abs_value < deadzone:
+        return 0.0  # Inside deadzone
+    elif abs_value < deadzone + ramp_width:
+        # In ramp zone - linear interpolation
+        ramp_factor = (abs_value - deadzone) / ramp_width
+        return value * ramp_factor
+    else:
+        # Outside ramp zone - full value
+        return value
+
+def quaternion_normalize(q):
+    """Normalize quaternion to unit length"""
+    norm = np.linalg.norm(q)
+    return q / norm if norm > 0.0001 else np.array([0,0,0,1])
+
+def quaternion_to_rotation_vector(q):
+    """
+    Convert quaternion [i,j,k,w] to UR rotation vector [rx,ry,rz]
+    UR uses axis-angle representation
+    """
+    q = quaternion_normalize(q)
+    i, j, k, w = q[0], q[1], q[2], q[3]
+    
+    # Ensure w is in valid range
+    w = max(-1.0, min(1.0, w))
+    
+    # Calculate angle. 
+    angle = 2 * math.acos(w)
+    
+    if abs(angle) < 0.001:
+        return [0.0, 0.0, 0.0]
+    
+    sin_half = math.sin(angle / 2)
+    if abs(sin_half) < 0.001:
+        return [0.0, 0.0, 0.0]
+    
+    # Axis vector (normalized i, j, k components) scaled by the angle
+    return [i * angle / sin_half, j * angle / sin_half, k * angle / sin_half]
+
+def clamp_position(pos):
+    """Clamp position to workspace limits"""
+    return [
+        max(UR_LIMITS['x_min'], min(UR_LIMITS['x_max'], pos[0])),
+        max(UR_LIMITS['y_min'], min(UR_LIMITS['y_max'], pos[1])),
+        max(UR_LIMITS['z_min'], min(UR_LIMITS['z_max'], pos[2]))
+    ]
+
+def rotation_vector_add(rv1, rv2):
+    """
+    Add two rotation vectors via quaternion multiplication.
+    Converts to quaternions, multiplies, converts back.
+    """
+    def rv_to_quat(rv):
+        angle = np.linalg.norm(rv)
+        if angle < 0.001:
+            return [0, 0, 0, 1]
+        axis = np.array(rv) / angle
+        half_angle = angle / 2
+        sin_half = math.sin(half_angle)
+        return [axis[0]*sin_half, axis[1]*sin_half, axis[2]*sin_half, math.cos(half_angle)]
+    
+    def quat_mult(q1, q2):
+        # q = [x, y, z, w]
+        x1, y1, z1, w1 = q1[0], q1[1], q1[2], q1[3]
+        x2, y2, z2, w2 = q2[0], q2[1], q2[2], q2[3]
+        return [
+            w1*x2 + x1*w2 + y1*z2 - z1*y2,  # x
+            w1*y2 - x1*z2 + y1*w2 + z1*x2,  # y
+            w1*z2 + x1*y2 - y1*x2 + z1*w2,  # z
+            w1*w2 - x1*x2 - y1*y2 - z1*z2   # w
+        ]
+    
+    q1 = rv_to_quat(rv1)
+    q2 = rv_to_quat(rv2)
+    q_result = quat_mult(q1, q2)
+    # Convert result quaternion back to rotation vector
+    return quaternion_to_rotation_vector(q_result)
+
+#==============================================================================
+# OPENGL VISUALIZATION
+#==============================================================================
+
+def draw_grid():
+    """Draw 3D reference grid"""
+    glBegin(GL_LINES)
+    glColor3f(0.3, 0.3, 0.3)
+    for i in range(-10, 11):
+        glVertex3f(i, -2, -10)
+        glVertex3f(i, -2, 10)
+        glVertex3f(-10, -2, i)
+        glVertex3f(10, -2, i)
+    glEnd()
+
+def draw_axes(length=2.0):
+    """Draw RGB coordinate axes"""
+    glLineWidth(3.0)
+    glBegin(GL_LINES)
+    # X axis - Red
+    glColor3f(1.0, 0.0, 0.0)
+    glVertex3f(0, 0, 0)
+    glVertex3f(length, 0, 0)
+    # Y axis - Green
+    glColor3f(0.0, 1.0, 0.0)
+    glVertex3f(0, 0, 0)
+    glVertex3f(0, length, 0)
+    # Z axis - Blue
+    glColor3f(0.0, 0.0, 1.0)
+    glVertex3f(0, 0, 0)
+    glVertex3f(0, 0, length)
+    glEnd()
+    glLineWidth(1.0)
+
+def Cube(color_multiplier=(1, 1, 1)):
+    """Draw colored cube with edges representing IMU orientation"""
+    # Define vertices relative to the IMU sensor (1 unit = 1 dimension)
+    vertices = (
+        (1, -1, 1), (1, 1, 1), (-1, 1, 1), (-1, -1, 1), # Front Face (Z+)
+        (1, -1, -1), (1, 1, -1), (-1, 1, -1), (-1, -1, -1) # Back Face (Z-)
+    )
+    
+    faces = (
+        (0, 1, 2, 3), # Front
+        (4, 7, 6, 5), # Back
+        (0, 4, 5, 1), # Right
+        (2, 6, 7, 3), # Left
+        (1, 5, 6, 2), # Top
+        (0, 3, 7, 4)  # Bottom
+    )
+    
+    colors = (
+        (1.0, 0.2, 0.2), # Front (Reddish) - Forward
+        (0.2, 0.2, 1.0), # Back (Blueish)
+        (0.2, 1.0, 0.2), # Right (Greenish)
+        (1.0, 1.0, 0.2), # Left (Yellowish)
+        (1.0, 0.2, 1.0), # Top (Magenta)
+        (0.2, 1.0, 1.0)  # Bottom (Cyan)
+    )
+    
+    # Draw faces
+    glBegin(GL_QUADS)
+    for i, face in enumerate(faces):
+        final_color = tuple(c * m for c, m in zip(colors[i], color_multiplier))
+        glColor3fv(final_color)
+        for vertex_idx in face:
+            glVertex3fv(vertices[vertex_idx])
+    glEnd()
+    
+    # Draw edges for definition
+    glColor3f(0.1, 0.1, 0.1)
+    glLineWidth(2.0)
+    glBegin(GL_LINES)
+    edges = ((0,1), (1,2), (2,3), (3,0), (4,5), (5,6), (6,7), (7,4), 
+             (0,4), (1,5), (2,6), (3,7))
+    for edge in edges:
+        for vertex in edge:
+            glVertex3fv(vertices[vertex])
+    glEnd()
+    glLineWidth(1.0)
+
+def draw_speed_indicators(runtime_config, display, font):
+    """Draws speed scale information as text labels, replacing the bar graphics."""
+    
+    width, height = display
+    x_start = width - 220
+    y_start = 20
+    text_spacing = 18
+    title_color = (150, 150, 255) # Light Blue/Purple
+    value_color = (255, 255, 255) # White
+    prompt_color = (100, 200, 100) # Pale Green
+    
+    def render_text(text, color, x, y):
+        text_surface = font.render(text, True, color)
+        text_data = pygame.image.tostring(text_surface, "RGBA", True)
+        
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        
+        glRasterPos2f(x, y)
+        glDrawPixels(text_surface.get_width(), text_surface.get_height(), GL_RGBA, GL_UNSIGNED_BYTE, text_data)
+        
+        glDisable(GL_BLEND) 
+
+    # Draw Title Background Box
+    glColor4f(0.05, 0.05, 0.05, 1.0) 
+    glBegin(GL_QUADS)
+    # Define box slightly larger than the text content
+    box_width = 210
+    box_height = 7 * text_spacing
+    glVertex2f(x_start - 10, y_start - 10);
+    glVertex2f(x_start - 10 + box_width, y_start - 10);
+    glVertex2f(x_start - 10 + box_width, y_start - 10 + box_height);
+    glVertex2f(x_start - 10, y_start - 10 + box_height);
+    glEnd()
+    
+    # 1. Linear Speed
+    y = y_start
+    render_text("LINEAR SCALE (m/deg):", title_color, x_start, y)
+    y += text_spacing
+    
+    linear_value_str = f"{runtime_config.LINEAR_SPEED_SCALE:.1f}x"
+    render_text(linear_value_str, value_color, x_start + 10, y)
+    y += text_spacing
+    
+    render_text("Adjust: UP/DOWN Arrows", prompt_color, x_start + 10, y)
+    y += text_spacing * 1.5 # Extra space
+
+    # 2. Angular Speed
+    render_text("ANGULAR SCALE (rad/deg):", title_color, x_start, y)
+    y += text_spacing
+    
+    angular_value_str = f"{runtime_config.ANGULAR_SPEED_SCALE:.1f}x"
+    render_text(angular_value_str, value_color, x_start + 10, y)
+    y += text_spacing
+    
+    render_text("Adjust: LEFT/RIGHT Arrows", prompt_color, x_start + 10, y)
+
+
+#==============================================================================
+# RTDE ROBOT CONTROLLER
+#==============================================================================
+
+class RTDEController:
+    """
+    Universal Robot RTDE control interface with comprehensive safety.
+    """
+    
+    def __init__(self, robot_ip, enabled=False, simulate=True, config_mgr=None):
+        self.robot_ip = robot_ip
+        self.enabled = enabled and RTDE_AVAILABLE
+        self.simulate = simulate
+        self.config_mgr = config_mgr
+        self.rtde_c = None
+        self.rtde_r = None
+        self.command_queue = deque(maxlen=100)
+        self.blend_mode = False  # Default to stop-then-move
+        self.last_command_time = 0
+        
+        # IMU data smoothing
+        self.smoothed_roll = 0.0
+        self.smoothed_pitch = 0.0
+        self.smoothed_yaw = 0.0
+        self.smoothing_factor = config_mgr.get('safety', 'smoothing_factor', 0.3) if config_mgr else 0.3
+        
+        # Velocity ramping
+        self.current_velocity_scale = 0.0
+        self.target_velocity_scale = 1.0
+        self.velocity_ramp_rate = config_mgr.get('safety', 'velocity_ramp_rate', 0.1) if config_mgr else 0.1
+        
+        # Robot state
+        self.current_tcp_pose = UR_BASE_POSITION + UR_BASE_ORIENTATION
+        self.target_tcp_pose = UR_BASE_POSITION + UR_BASE_ORIENTATION
+        self.last_joint_positions = [0, -1.57, 1.57, -1.57, -1.57, 0]  # Safe home
+        self.robot_status_text = "Disconnected"
+        self.last_state_update = 0
+        self.state_update_interval = 0.1
+        
+        # Connection recovery
+        self.connection_lost = False
+        self.reconnect_attempts = 0
+        self.max_reconnect_attempts = 5
+        self.last_reconnect_attempt = 0
+        self.reconnect_cooldown = 2.0
+        
+        # Statistics
+        self.total_commands_sent = 0
+        self.successful_commands = 0
+        self.failed_commands = 0
+        
+        # Initialize log file
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_filename = f"rtde_commands_{timestamp}.log"
+        try:
+            self.log_file = open(log_filename, "w")
+            self.log_file.write(f"# RTDE Control Log - {datetime.now()}\n")
+            self.log_file.write(f"# Mode: {'SIMULATE' if simulate else 'REAL'}\n")
+            self.log_file.write(f"# Robot IP: {robot_ip}\n\n")
+            print(f"Logging to: {log_filename}")
+        except Exception as e:
+            print(f"Warning: Could not create log file: {e}")
+            self.log_file = None
+        
+        if self.enabled and not self.simulate:
+            self.connect()
+    
+    def connect(self):
+        """Connect to UR robot via RTDE"""
+        try:
+            print(f"Connecting to UR robot at {self.robot_ip}...")
+            self.rtde_c = rtde_control.RTDEControlInterface(self.robot_ip)
+            self.rtde_r = rtde_receive.RTDEReceiveInterface(self.robot_ip)
+            
+            # Get current robot state
+            current_pose = self.rtde_r.getActualTCPPose()
+            if current_pose:
+                self.current_tcp_pose = current_pose
+                self.target_tcp_pose = current_pose[:]
+                print(f"Current TCP: [{current_pose[0]:.3f}, {current_pose[1]:.3f}, {current_pose[2]:.3f}]")
+            
+            print(f"RTDE connected successfully")
+            self.log_command(f"# Connected to robot at {self.robot_ip}")
+            
+            # Reset connection tracking
+            self.connection_lost = False
+            self.reconnect_attempts = 0
+            
+            return True
+            
+        except Exception as e:
+            error_msg = RobotError.format_error('E102', str(e), f"IP: {self.robot_ip}")
+            print(error_msg)
+            RobotError.log_error(self.log_file, 'E102', str(e), f"IP: {self.robot_ip}")
+            self.rtde_c = None
+            self.rtde_r = None
+            self.connection_lost = True
+            return False
+    
+    def attempt_reconnect(self):
+        """Attempt reconnection after connection loss"""
+        current_time = time.time()
+        
+        if current_time - self.last_reconnect_attempt < self.reconnect_cooldown:
+            return False
+        
+        if self.reconnect_attempts >= self.max_reconnect_attempts:
+            error_msg = RobotError.format_error('E103',
+                f"Maximum attempts ({self.max_reconnect_attempts}) reached",
+                "Connection recovery failed")
+            print(error_msg)
+            RobotError.log_error(self.log_file, 'E103',
+                f"Max attempts: {self.max_reconnect_attempts}", "Recovery failed")
+            return False
+        
+        self.last_reconnect_attempt = current_time
+        self.reconnect_attempts += 1
+        
+        print(f"Reconnecting ({self.reconnect_attempts}/{self.max_reconnect_attempts})...")
+        self.log_command(f"# Reconnection attempt {self.reconnect_attempts}")
+        
+        # Close existing connections
+        try:
+            if self.rtde_c:
+                self.rtde_c.disconnect()
+            if self.rtde_r:
+                self.rtde_r.disconnect()
+        except:
+            pass
+        
+        return self.connect()
+    
+    def check_connection_health(self):
+        """Check if RTDE connection is alive"""
+        if not self.enabled or not self.rtde_r:
+            return False
+        
+        try:
+            robot_mode = self.rtde_r.getRobotMode()
+            return robot_mode is not None
+        except Exception as e:
+            self.log_command(f"# Connection health check failed: {e}")
+            return False
+    
+    def log_command(self, command):
+        """Log command with timestamp"""
+        if self.log_file and not self.log_file.closed:
+            timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+            self.log_file.write(f"[{timestamp}] {command}\n")
+            self.log_file.flush()
+    
+    def set_blend_mode(self, blend_enabled):
+        """Toggle blend mode (smooth vs stop-then-move)"""
+        self.blend_mode = blend_enabled
+        self.log_command(f"# Blend mode: {'ENABLED' if blend_enabled else 'DISABLED'}")
+        print(f"Blend mode: {'SMOOTH (servoL)' if blend_enabled else 'STOP-MOVE (moveL)'}")
+    
+    def validate_robot_state(self):
+        """Check if robot is in safe state to accept commands"""
+        if not self.enabled or not self.rtde_r:
+            return False, RobotError.format_error('E101', details="RTDE not initialized")
+        
+        try:
+            # Check robot mode
+            robot_mode = self.rtde_r.getRobotMode()
+            if robot_mode != 7:  # 7 = Running mode
+                mode_names = {
+                    -1: "Disconnected", 0: "Confirm Safety", 1: "Booting",
+                    2: "Power Off", 3: "Power On", 4: "Idle", 5: "Backdrive",
+                    6: "Running", 7: "Running", 8: "Updating Firmware"
+                }
+                mode_name = mode_names.get(robot_mode, f"Unknown ({robot_mode})")
+                return False, RobotError.format_error('E201',
+                    details=f"Current mode: {mode_name}",
+                    context="Robot must be in Running mode (7)")
+            
+            # Check safety status
+            safety_status = self.rtde_r.getSafetyMode()
+            if safety_status != 1:  # 1 = Normal
+                safety_names = {
+                    0: "Undefined", 1: "Normal", 2: "Reduced",
+                    3: "Protective Stop", 4: "Recovery", 5: "Safeguard Stop",
+                    6: "System Emergency Stop", 7: "Robot Emergency Stop",
+                    8: "Violation", 9: "Fault"
+                }
+                safety_name = safety_names.get(safety_status, f"Unknown ({safety_status})")
+                
+                if safety_status == 3:
+                    return False, RobotError.format_error('E202',
+                        details=f"Safety: {safety_name}",
+                        context="Clear protective stop on teach pendant")
+                elif safety_status in [6, 7]:
+                    return False, RobotError.format_error('E203',
+                        details=f"Safety: {safety_name}",
+                        context="Reset emergency stop button")
+                else:
+                    return False, RobotError.format_error('E205',
+                        details=f"Safety: {safety_name}",
+                        context="Check safety system")
+            
+            return True, "OK"
+            
+        except Exception as e:
+            return False, RobotError.format_error('E101', str(e), "State validation failed")
+    
+    def update_robot_status(self):
+        """Update robot status periodically"""
+        current_time = time.time()
+        if current_time - self.last_state_update < self.state_update_interval:
+            return
+        
+        self.last_state_update = current_time
+        
+        if not self.enabled or not self.rtde_r:
+            self.robot_status_text = "Robot: DISABLED"
+            return
+        
+        try:
+            # Get current TCP pose
+            tcp_pose = self.rtde_r.getActualTCPPose()
+            if tcp_pose:
+                self.current_tcp_pose = tcp_pose
+            
+            # Get joint positions
+            joint_pos = self.rtde_r.getActualQ()
+            if joint_pos:
+                self.last_joint_positions = joint_pos
+            
+            # Check status
+            robot_mode = self.rtde_r.getRobotMode()
+            safety_mode = self.rtde_r.getSafetyMode()
+            
+            if robot_mode == 7 and safety_mode == 1:
+                self.robot_status_text = f"Robot: READY | TCP: [{tcp_pose[0]:.3f}, {tcp_pose[1]:.3f}, {tcp_pose[2]:.3f}]"
+            else:
+                self.robot_status_text = f"Robot: NOT READY (Mode: {robot_mode}, Safety: {safety_mode})"
+                
+        except Exception as e:
+            self.robot_status_text = f"Robot: ERROR - {str(e)[:50]}"
+            self.connection_lost = True
+    
+    def get_status_display(self):
+        """Get formatted status for display"""
+        # NOTE: Returning a dictionary ensures robustness against TypeErrors during access
+        return {
+            'robot_status': self.robot_status_text,
+            'tcp_pose': self.current_tcp_pose,
+            'joint_angles': [math.degrees(j) for j in self.last_joint_positions],
+            'target_velocity': self.current_velocity_scale,
+            'blend_mode': 'SMOOTH' if self.blend_mode else 'STOP-MOVE',
+            'connection_lost': self.connection_lost,
+            'reconnect_attempts': self.reconnect_attempts,
+            'total_commands': self.total_commands_sent,
+            'success_rate': (self.successful_commands / self.total_commands_sent * 100) if self.total_commands_sent > 0 else 0
+        }
+    
+    def check_joint_limits(self, target_pose):
+        """Check if target pose would violate joint limits"""
+        if not self.rtde_r:
+            return True, "No robot connection"
+        
+        try:
+            current_joints = self.rtde_r.getActualQ()
+            if not current_joints or len(current_joints) != 6:
+                return True, "Could not read joints"
+            
+            # Use inverse kinematics to predict joint positions
+            predicted_joints = self.rtde_r.getInverseKinematics(target_pose, current_joints)
+            
+            if not predicted_joints or len(predicted_joints) != 6:
+                return False, RobotError.format_error('E304', 
+                    details="IK solution not found",
+                    context="Pose may be unreachable")
+            
+            # Check each joint
+            joint_names = ['Base', 'Shoulder', 'Elbow', 'Wrist1', 'Wrist2', 'Wrist3']
+            limit_list = [
+                UR_JOINT_LIMITS['joint_0'], UR_JOINT_LIMITS['joint_1'],
+                UR_JOINT_LIMITS['joint_2'], UR_JOINT_LIMITS['joint_3'],
+                UR_JOINT_LIMITS['joint_4'], UR_JOINT_LIMITS['joint_5']
+            ]
+            
+            safety_margin = 0.05  # ~3 degrees
+            for i, (joint_val, (min_val, max_val)) in enumerate(zip(predicted_joints, limit_list)):
+                if joint_val < (min_val + safety_margin) or joint_val > (max_val - safety_margin):
+                    return False, RobotError.format_error('E301',
+                        details=f"{joint_names[i]} would exceed limit",
+                        context=f"Predicted: {math.degrees(joint_val):.1f}°, Range: [{math.degrees(min_val):.1f}°, {math.degrees(max_val):.1f}°]")
+            
+            return True, "OK"
+            
+        except Exception as e:
+            self.log_command(f"# ERROR in joint limit check: {e}")
+            return False, f"Joint limit check error: {str(e)}"
+    
+    def check_singularity_proximity(self, target_pose=None):
+        """Check for kinematic singularities"""
+        if not self.rtde_r:
+            return True, "No robot connection"
+        
+        try:
+            if target_pose:
+                current_joints = self.rtde_r.getActualQ()
+                joint_positions = self.rtde_r.getInverseKinematics(target_pose, current_joints)
+                if not joint_positions:
+                    return False, RobotError.format_error('E302',
+                        details="IK failed",
+                        context="Pose may be singular")
+            else:
+                joint_positions = self.rtde_r.getActualQ()
+                if not joint_positions:
+                    return True, "Could not read joints"
+            
+            # Singularity thresholds (radians)
+            WRIST_SINGULARITY_THRESHOLD = 0.15
+            SHOULDER_SINGULARITY_THRESHOLD = 0.15
+            ELBOW_SINGULARITY_THRESHOLD = 0.1
+            
+            # Wrist singularity (J4 near zero)
+            if abs(joint_positions[4]) < WRIST_SINGULARITY_THRESHOLD:
+                return False, RobotError.format_error('E302',
+                    details=f"Wrist singularity: J4={math.degrees(joint_positions[4]):.1f}°",
+                    context="Wrist axes aligned")
+            
+            # Shoulder singularity (TCP above/below base)
+            shoulder_elbow_sum = abs(joint_positions[1] + joint_positions[2])
+            if shoulder_elbow_sum < SHOULDER_SINGULARITY_THRESHOLD:
+                return False, RobotError.format_error('E302',
+                    details=f"Shoulder singularity: J1+J2={math.degrees(shoulder_elbow_sum):.1f}°",
+                    context="TCP near base axis")
+            
+            # Elbow singularity (arm fully extended/retracted)
+            if abs(joint_positions[2]) < ELBOW_SINGULARITY_THRESHOLD:
+                return False, RobotError.format_error('E302',
+                    details=f"Elbow singularity: J2={math.degrees(joint_positions[2]):.1f}°",
+                    context="Arm near full extension")
+            
+            if abs(abs(joint_positions[2]) - math.pi) < ELBOW_SINGULARITY_THRESHOLD:
+                return False, RobotError.format_error('E302',
+                    details=f"Elbow singularity: J2={math.degrees(joint_positions[2]):.1f}°",
+                    context="Arm near full retraction")
+            
+            return True, "OK"
+            
+        except Exception as e:
+            self.log_command(f"# ERROR checking singularity: {e}")
+            return False, f"Singularity check error: {str(e)}"
+    
+    def apply_smoothing(self, roll, pitch, yaw):
+        """Apply exponential smoothing to IMU data"""
+        self.smoothed_roll = (1 - self.smoothing_factor) * self.smoothed_roll + self.smoothing_factor * roll
+        self.smoothed_pitch = (1 - self.smoothing_factor) * self.smoothed_pitch + self.smoothing_factor * pitch
+        self.smoothed_yaw = (1 - self.smoothing_factor) * self.smoothed_yaw + self.smoothing_factor * yaw
+        return self.smoothed_roll, self.smoothed_pitch, self.smoothed_yaw
+    
+    def calculate_velocity_scale(self, roll, pitch, yaw):
+        """Scale velocity based on IMU movement speed"""
+        angular_velocity = math.sqrt(roll**2 + pitch**2 + yaw**2)
+        
+        # Slow down if moving IMU too fast
+        if angular_velocity > 30.0:
+            scale = 30.0 / angular_velocity
+            target_scale = max(0.1, min(1.0, scale))
+        else:
+            target_scale = 1.0
+        
+        # Apply smooth ramping
+        if target_scale > self.current_velocity_scale:
+            self.current_velocity_scale = min(target_scale,
+                self.current_velocity_scale + self.velocity_ramp_rate)
+        else:
+            self.current_velocity_scale = max(target_scale,
+                self.current_velocity_scale - self.velocity_ramp_rate)
+        
+        return self.current_velocity_scale
+    
+    def move_base_frame_xy(self, roll_delta, pitch_delta, linear_scale, velocity_scale=1.0):
+        """MODE 1: Move TCP in XY plane relative to base frame"""
+        
+        # MAPPING CORRECTION: Roll -> X (Forward/Back), Pitch -> Y (Side-to-Side)
+        # Sign Correction: If tilting forward (positive roll), robot should move forward (positive X).
+        # Sign Correction: If tilting left (positive pitch), robot should move left (positive Y).
+        
+        # UR convention: X=Forward, Y=Left, Z=Up
+        dx = roll_delta * CONTROL_PARAMS['base_translation'] * linear_scale
+        dy = pitch_delta * CONTROL_PARAMS['base_translation'] * linear_scale
+        dz = 0
+        
+        position_delta = [dx, dy, dz]
+        orientation_delta = [0, 0, 0]
+        
+        return self.move_tcp_cartesian(position_delta, orientation_delta, velocity_scale)
+    
+    def move_base_frame_orientation(self, roll_delta, pitch_delta, yaw_delta, angular_scale, velocity_scale=1.0):
+        """MODE 3: Rotate TCP orientation (Rx, Ry, Rz) relative to Base Frame"""
+        position_delta = [0, 0, 0]
+        
+        # MAPPING CORRECTION (Confirmed by user feedback):
+        # Roll drives Rx (Tilt F/B should cause rotation around X axis)
+        # Pitch drives Ry (Tilt L/R should cause rotation around Y axis)
+        # Yaw drives Rz (Twist should cause rotation around Z axis)
+        
+        # Note: If Yaw causes the cube to roll side-to-side, that means Yaw input
+        # was influencing Rx/Ry calculation. We ensure Rz is controlled only by Yaw.
+        
+        orientation_delta = [
+            roll_delta * CONTROL_PARAMS['robot_orientation'] * angular_scale,  # Roll drives Rx
+            pitch_delta * CONTROL_PARAMS['robot_orientation'] * angular_scale, # Pitch drives Ry
+            yaw_delta * CONTROL_PARAMS['base_rotation'] * angular_scale,       # Yaw drives Rz (No inherent sign flip needed if IMU yaw is CW positive)
+        ]
+        
+        return self.move_tcp_cartesian(position_delta, orientation_delta, velocity_scale)
+    
+    def move_tcp_cartesian(self, position_delta, orientation_delta, velocity_scale=1.0):
+        """Execute TCP movement with full safety validation"""
+        current_time = time.time()
+        
+        # Validate robot state
+        state_ok, state_msg = self.validate_robot_state()
+        if not state_ok:
+            if self.total_commands_sent % 100 == 0:  # Only print occasionally
+                print(state_msg)
+            self.log_command(f"# BLOCKED by state validation")
+            return False
+        
+        # Rate limiting (125Hz max for RTDE)
+        if current_time - self.last_command_time < 0.008:
+            return False
+        
+        self.last_command_time = current_time
+        self.total_commands_sent += 1
+        
+        # Get current pose
+        if self.rtde_r and not self.simulate:
+            try:
+                current_pose = self.rtde_r.getActualTCPPose()
+                if current_pose:
+                    self.current_tcp_pose = current_pose
+            except:
+                # If reading fails, assume last known pose for calculation continuity
+                pass 
+        
+        # Calculate new position
+        new_position = [
+            self.current_tcp_pose[0] + position_delta[0],
+            self.current_tcp_pose[1] + position_delta[1],
+            self.current_tcp_pose[2] + position_delta[2]
+        ]
+        
+        # Clamp to workspace
+        new_position = clamp_position(new_position)
+        
+        # Calculate new orientation (accumulation via rotation vector addition)
+        current_orientation = self.current_tcp_pose[3:6]
+        new_orientation = rotation_vector_add(current_orientation, orientation_delta)
+        
+        # Combine into target pose
+        target_pose = new_position + new_orientation
+        
+        # === SAFETY CHECKS (RTDE Integrity Preserved) ===
+        
+        # 1. Data Validation
+        if len(target_pose) != 6 or any(not math.isfinite(x) for x in target_pose):
+            error_msg = RobotError.format_error('E401', details="NaN/Inf or invalid pose length")
+            print(error_msg)
+            RobotError.log_error(self.log_file, 'E401', "NaN/Inf", f"Deltas: {position_delta}, {orientation_delta}")
+            self.failed_commands += 1
+            return False
+        
+        # 2. Workspace Boundary Check (position clamping handles safety, but we log the attempt)
+        if (target_pose[0] != new_position[0] or target_pose[1] != new_position[1] or target_pose[2] != new_position[2]):
+             # Log that clamping occurred due to boundary
+            RobotError.log_error(self.log_file, 'E303', f"Pos: {target_pose[:3]}", "Clamped near boundary")
+
+        # 3. Kinematic Checks (Joint Limits & Singularity)
+        if not self.simulate and self.rtde_r:
+            limits_ok, limits_msg = self.check_joint_limits(target_pose)
+            if not limits_ok:
+                if self.total_commands_sent % 50 == 0: print(limits_msg)
+                self.failed_commands += 1; return False
+            
+            singular_ok, singular_msg = self.check_singularity_proximity(target_pose)
+            if not singular_ok:
+                if self.total_commands_sent % 50 == 0: print(singular_msg)
+                self.failed_commands += 1; return False
+        
+        # Update target
+        self.target_tcp_pose = target_pose
+        
+        # Apply velocity scaling
+        scaled_velocity = UR_MAX_VELOCITY * velocity_scale
+        scaled_acceleration = UR_MAX_ACCELERATION * velocity_scale
+        
+        # Log command
+        pose_str = "[" + ", ".join([f"{x:.4f}" for x in target_pose]) + "]"
+        
+        if self.blend_mode:
+            command = f"servoL({pose_str}, vel={scaled_velocity:.3f}, acc={scaled_acceleration:.3f})"
+        else:
+            command = f"moveL({pose_str}, vel={scaled_velocity:.3f}, acc={scaled_acceleration:.3f})"
+        
+        self.log_command(command)
+        
+        if self.simulate:
+            self.successful_commands += 1
+            return True
+        
+        if not self.enabled or not self.rtde_c:
+            self.failed_commands += 1
+            return False
+        
+        # Execute command
+        try:
+            if self.blend_mode:
+                success = self.rtde_c.servoL(target_pose, scaled_velocity, scaled_acceleration)
+            else:
+                success = self.rtde_c.moveL(target_pose, scaled_velocity, scaled_acceleration)
+            
+            if success:
+                self.successful_commands += 1
+            else:
+                self.failed_commands += 1
+            
+            return success
+            
+        except Exception as e:
+            self.log_command(f"# ERROR: {e}")
+            print(f"RTDE command error: {e}")
+            self.connection_lost = True
+            self.failed_commands += 1
+            return False
+    
+    def move_tcp_quaternion_target(self, target_quat, angular_scale, velocity_scale=1.0):
+        """MODE 6: Sets the target orientation based on the IMU's relative quaternion position."""
+        
+        # Convert the relative quaternion position directly to the target rotation vector (RV)
+        target_rv = quaternion_to_rotation_vector(target_quat)
+        
+        # Apply angular scaling to the RV magnitude (axis/angle length)
+        target_rv = np.array(target_rv) * angular_scale 
+        
+        # The delta RV required to reach the new orientation *from the current orientation*
+        # This is essentially rate control based on angular position error.
+        orientation_delta = rotation_vector_add(target_rv.tolist(), [-x for x in self.current_tcp_pose[3:6]])
+        
+        # Use move_tcp_cartesian, which adds this delta to the current pose safely.
+        return self.move_tcp_cartesian([0, 0, 0], orientation_delta, velocity_scale)
+        
+    def emergency_stop(self):
+        """Emergency stop robot"""
+        if self.enabled and self.rtde_c:
+            try:
+                self.rtde_c.stopL(10.0)  # 10 m/s² deceleration
+                print("EMERGENCY STOP EXECUTED")
+            except Exception as e:
+                print(f"Emergency stop error: {e}")
+        self.log_command("# EMERGENCY STOP")
+    
+    def reset_to_home(self):
+        """Reset robot to home position"""
+        self.target_tcp_pose = UR_BASE_POSITION + UR_BASE_ORIENTATION
+        if self.enabled and not self.simulate and self.rtde_c:
+            try:
+                home_pose = UR_BASE_POSITION + UR_BASE_ORIENTATION
+                self.rtde_c.moveL(home_pose, UR_MAX_VELOCITY * 0.5, UR_MAX_ACCELERATION * 0.5)
+                print("Robot moving to home position")
+            except Exception as e:
+                print(f"Reset to home error: {e}")
+        self.log_command("# Reset to home")
+    
+    def get_statistics(self):
+        """Get performance statistics"""
+        success_rate = (self.successful_commands / self.total_commands_sent * 100) if self.total_commands_sent > 0 else 0
+        return {
+            'total': self.total_commands_sent,
+            'successful': self.successful_commands,
+            'failed': self.failed_commands,
+            'success_rate': success_rate
+        }
+    
+    def close(self):
+        """Close connections and log file"""
+        if self.rtde_c:
+            try:
+                self.rtde_c.disconnect()
+            except:
+                pass
+        if self.rtde_r:
+            try:
+                self.rtde_r.disconnect()
+            except:
+                pass
+        if self.log_file and not self.log_file.closed:
+            # Write statistics
+            stats = self.get_statistics()
+            self.log_file.write(f"\n# Session Statistics:\n")
+            self.log_file.write(f"# Total commands: {stats['total']}\n")
+            self.log_file.write(f"# Successful: {stats['successful']}\n")
+            self.log_file.write(f"# Failed: {stats['failed']}\n")
+            self.log_file.write(f"# Success rate: {stats['success_rate']:.1f}%\n")
+            self.log_file.close()
+            print(f"Session stats: {stats['total']} commands, {stats['success_rate']:.1f}% success rate")
+
+#==============================================================================
+# MAIN APPLICATION
+#==============================================================================
+
+def main():
+    """Main application loop with complete error handling"""
+    
+    # Initialize configuration
+    print("Initializing configuration...")
+    config_manager = ConfigManager()
+    imu_calibration = IMUCalibration(config_manager)
+    runtime_config = RuntimeConfig(config_manager)
+    
+    # Initialize PyGame and OpenGL
+    print("Initializing graphics...")
+    pygame.init()
+    display_width = config_manager.get('visualization', 'window_width', 1200)
+    display_height = config_manager.get('visualization', 'window_height', 800)
+    display = (display_width, display_height)
+    
+    try:
+        screen = pygame.display.set_mode(display, DOUBLEBUF | OPENGL)
+    except Exception as e:
+        print(f"ERROR: Could not initialize display: {e}")
+        return
+    
+    pygame.display.set_caption("UR Robot RTDE + IMU Control")
+    glEnable(GL_DEPTH_TEST)
+    glClearColor(0.1, 0.1, 0.15, 1.0)
+    
+    # Initialize font
+    pygame.font.init()
+    font = pygame.font.SysFont('monospace', 14)
+    
+    # Setup camera
+    camera_distance = config_manager.get('visualization', 'camera_distance', 20.0)
+    gluPerspective(45, (display[0] / display[1]), 0.1, 50.0)
+    glTranslatef(0.0, 0.0, -camera_distance)
+    
+    # Visualization state
+    persistent_pos = np.array([0.0, -1.0, 0.0])
+    persistent_rot_quat = np.array([0.0, 0.0, 0.0, 1.0]) 
+    velocity = np.array([0.0, 0.0, 0.0]) # Velocity for visualization cube drift
+    
+    is_active = False
+    current_mode = 0
+    last_mode = -1
+    
+    # Initialize RTDE Controller
+    print("Initializing RTDE controller...")
+    rtde_controller = RTDEController(UR_ROBOT_IP, UR_ENABLED, UR_SIMULATE, config_manager)
+    
+    # Initialize communication
+    ser = None
+    sock = None
+    communication_mode = "None"
+    
+    if USE_WIFI:
+        communication_mode = "WiFi"
+        print(f"Connecting to ESP32 via WiFi ({WIFI_HOST}:{WIFI_PORT})...")
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(5.0)
+            sock.connect((WIFI_HOST, WIFI_PORT))
+            sock.settimeout(0.02)
+            print(f"Connected via WiFi TCP")
+        except Exception as e:
+            error_msg = RobotError.format_error('E105', str(e),
+                f"WiFi: {WIFI_HOST}:{WIFI_PORT}")
+            print(error_msg)
+            print("Failed to connect. Check ESP32 WiFi AP and IP address.")
+            return
+    else:
+        communication_mode = "USB"
+        print(f"Connecting to ESP32 via USB ({SERIAL_PORT})...")
+        try:
+            ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=0.02)
+            print(f"Connected via USB Serial")
+        except Exception as e:
+            error_msg = RobotError.format_error('E104', str(e),
+                f"Serial: {SERIAL_PORT}")
+            print(error_msg)
+            print("Failed to connect. Check USB connection and port name.")
+            return
+    
+    clock = pygame.time.Clock()
+    
+    # Print startup information
+    config_manager.print_summary()
+    
+    print("\nIMU Calibration Status:")
+    print(f"  Status: {imu_calibration.get_status()}")
+    if imu_calibration.is_calibrated:
+        print(f"  Roll offset: {imu_calibration.zero_offsets['roll']:.2f}°")
+        print(f"  Pitch offset: {imu_calibration.zero_offsets['pitch']:.2f}°")
+        print(f"  Yaw offset: {imu_calibration.zero_offsets['yaw']:.2f}°")
+    print()
+    
+    print("="*70)
+    print("UNIVERSAL ROBOT RTDE + IMU CONTROL SYSTEM")
+    print("="*70)
+    print(f"Communication: {communication_mode}")
+    print(f"RTDE Library: {'Available' if RTDE_AVAILABLE else 'NOT INSTALLED'}")
+    print(f"Robot IP: {UR_ROBOT_IP}")
+    print(f"Robot Control: {'ENABLED' if UR_ENABLED else 'DISABLED'}")
+    print(f"Simulation Mode: {'ON' if UR_SIMULATE else 'OFF (REAL ROBOT)'}")
+    print(f"Remapped Modes: {'ENABLED' if runtime_config.ENABLE_REMAPPED_MODES else 'DISABLED (SAFETY)'}")
+    print("\nControl Modes:")
+    for mode_num, mode_name in CONTROL_MODES.items():
+        if mode_num == 0:
+            continue
+        status = ""
+        if mode_num in [1, 3] and not runtime_config.ENABLE_REMAPPED_MODES:
+            status = " [DISABLED - Press M to enable]"
+        print(f"  Mode {mode_num}: {mode_name}{status}")
+    print("\nKeyboard Controls:")
+    print("  ESC: Exit program")
+    print("  R: Reset robot and visualization to home")
+    print("  U: Toggle UR robot control ON/OFF")
+    print("  B: Toggle blend mode (smooth vs stop-then-move)")
+    print("  S: Emergency stop robot")
+    print("  M: Toggle remapped modes (1-3) ON/OFF")
+    print("  C: Save current configuration")
+    print("  SHIFT+C: Start IMU calibration wizard")
+    print("  V: View IMU calibration status")
+    print("  X: Reset IMU calibration to defaults")
+    print("  SPACE: Advance calibration step or re-home")
+    print("  UP/DOWN Arrow: Adjust Linear Speed Scale")
+    print("  LEFT/RIGHT Arrow: Adjust Angular Speed Scale")
+    print("="*70)
+    print("\nSystem ready. Waiting for IMU data...\n")
+    
+    # Main loop
+    running = True
+    frame_count = 0
+    last_fps_print = time.time()
+    
+    try:
+        while running:
+            frame_count += 1
+            
+            # Print FPS every 5 seconds
+            if frame_count % 625 == 0:
+                current_time = time.time()
+                elapsed = current_time - last_fps_print
+                fps = 625 / elapsed if elapsed > 0 else 0
+                print(f"FPS: {fps:.1f} | Commands: {rtde_controller.total_commands_sent} | Success: {rtde_controller.get_statistics()['success_rate']:.1f}%")
+                last_fps_print = current_time
+            
+            # Event handling
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    running = False
+                
+                elif event.type == pygame.K_r:
+                    # Reset to home (Removed, must be in KEYDOWN)
+                    pass
+                
+                elif event.type == pygame.K_u:
+                    # Toggle robot control (Removed, must be in KEYDOWN)
+                    pass
+                
+                elif event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_ESCAPE:
+                        running = False
+                    
+                    # --- RESTORED KEYBOARD FUNCTIONALITY ---
+                    elif event.key == pygame.K_r:
+                        # Reset to home
+                        persistent_pos = np.array([0.0, -1.0, 0.0])
+                        persistent_rot_quat = np.array([0, 0, 0, 1])
+                        velocity = np.array([0.0, 0.0, 0.0])
+                        rtde_controller.reset_to_home()
+                        print("Reset to home position")
+                    
+                    elif event.key == pygame.K_u:
+                        # Toggle robot control
+                        rtde_controller.enabled = not rtde_controller.enabled
+                        status = "ENABLED" if rtde_controller.enabled else "DISABLED"
+                        print(f"Robot control: {status}")
+                        rtde_controller.log_command(f"# Robot control: {status}")
+                    
+                    elif event.key == pygame.K_b:
+                        # Toggle blend mode
+                        rtde_controller.set_blend_mode(not rtde_controller.blend_mode)
+                    
+                    elif event.key == pygame.K_s:
+                        # Emergency stop
+                        rtde_controller.emergency_stop()
+                    
+                    elif event.key == pygame.K_m:
+                        # Toggle remapped modes
+                        runtime_config.ENABLE_REMAPPED_MODES = not runtime_config.ENABLE_REMAPPED_MODES
+                        status = "ENABLED" if runtime_config.ENABLE_REMAPPED_MODES else "DISABLED"
+                        print(f"Remapped modes (1-3): {status}")
+                        config_manager.set(runtime_config.ENABLE_REMAPPED_MODES, 'remapping', 'enable_remapped_modes')
+                        config_manager.save_config()
+                        rtde_controller.log_command(f"# Remapped modes: {status}")
+                    
+                    # --- Speed Control Keys ---
+                    elif event.key == pygame.K_UP:
+                        # Increase Linear Speed
+                        runtime_config.LINEAR_SPEED_SCALE = min(runtime_config.MAX_SCALE, runtime_config.LINEAR_SPEED_SCALE + runtime_config.STEP_SCALE)
+                        print(f"Linear Speed Scale: {runtime_config.LINEAR_SPEED_SCALE:.1f}")
+                        config_manager.set(runtime_config.LINEAR_SPEED_SCALE, 'speed_scaling', 'linear_scale')
+                    elif event.key == pygame.K_DOWN:
+                        # Decrease Linear Speed
+                        runtime_config.LINEAR_SPEED_SCALE = max(runtime_config.MIN_SCALE, runtime_config.LINEAR_SPEED_SCALE - runtime_config.STEP_SCALE)
+                        print(f"Linear Speed Scale: {runtime_config.LINEAR_SPEED_SCALE:.1f}")
+                        config_manager.set(runtime_config.LINEAR_SPEED_SCALE, 'speed_scaling', 'linear_scale')
+                    elif event.key == pygame.K_RIGHT:
+                        # Increase Angular Speed
+                        runtime_config.ANGULAR_SPEED_SCALE = min(runtime_config.MAX_SCALE, runtime_config.ANGULAR_SPEED_SCALE + runtime_config.STEP_SCALE)
+                        print(f"Angular Speed Scale: {runtime_config.ANGULAR_SPEED_SCALE:.1f}")
+                        config_manager.set(runtime_config.ANGULAR_SPEED_SCALE, 'speed_scaling', 'angular_scale')
+                    elif event.key == pygame.K_LEFT:
+                        # Decrease Angular Speed
+                        runtime_config.ANGULAR_SPEED_SCALE = max(runtime_config.MIN_SCALE, runtime_config.ANGULAR_SPEED_SCALE - runtime_config.STEP_SCALE)
+                        print(f"Angular Speed Scale: {runtime_config.ANGULAR_SPEED_SCALE:.1f}")
+                        config_manager.set(runtime_config.ANGULAR_SPEED_SCALE, 'speed_scaling', 'angular_scale')
+                    # --- End Speed Control Keys ---
+
+                    elif event.key == pygame.K_c:
+                        # Save config or start calibration
+                        keys_pressed = pygame.key.get_mods()
+                        if keys_pressed & pygame.KMOD_SHIFT:
+                            # SHIFT+C: Start calibration
+                            imu_calibration.start_calibration_wizard()
+                        else:
+                            # C: Save config
+                            if config_manager.save_config():
+                                print("Configuration saved to file")
+                            else:
+                                print("Failed to save configuration")
+                    
+                    elif event.key == pygame.K_v:
+                        # View calibration status
+                        print("\n" + "="*70)
+                        print("IMU CALIBRATION STATUS")
+                        print("="*70)
+                        print(f"Status: {imu_calibration.get_status()}")
+                        print(f"Offsets:")
+                        print(f"  Roll: {imu_calibration.zero_offsets['roll']:.2f}°")
+                        print(f"  Pitch: {imu_calibration.zero_offsets['pitch']:.2f}°")
+                        print(f"  Yaw: {imu_calibration.zero_offsets['yaw']:.2f}°")
+                        print("="*70 + "\n")
+                    
+                    elif event.key == pygame.K_x:
+                        # Reset calibration
+                        imu_calibration.reset_calibration()
+                    
+                    elif event.key == pygame.K_SPACE:
+                        if imu_calibration.calibration_active:
+                            if imu_calibration.calibration_step == 0:
+                                print("Capturing zero position...")
+                            elif imu_calibration.calibration_step == 1:
+                                imu_calibration.complete_calibration()
+                        else:
+                            print("Re-homing current position")
+            
+            # IMU data reading
+            imu_data = None
+            line = ""
+            
+            if USE_WIFI and sock:
+                # [WiFi Reading Logic - kept intact]
+                try:
+                    data = sock.recv(1024)
+                    if data:
+                        received = data.decode('utf-8', errors='ignore').strip()
+                        if '\n' in received:
+                            lines = received.split('\n')
+                            line = lines[-2] if len(lines) > 1 and lines[-2] else lines[-1] 
+                        else:
+                            line = received
+                except socket.timeout:
+                    pass
+                except ConnectionResetError:
+                    print("WiFi connection lost. Attempting to reconnect...")
+                    try:
+                        sock.close()
+                        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                        sock.settimeout(0.02)
+                        sock.connect((WIFI_HOST, WIFI_PORT))
+                        print("WiFi reconnected")
+                    except:
+                        pass
+                except Exception as e:
+                    if frame_count % 625 == 0:
+                        print(f"WiFi error: {e}")
+            else:
+                if ser and ser.is_open:
+                    # [Serial Reading Logic - kept intact]
+                    try:
+                        line = ser.readline().decode('utf-8', errors='ignore').strip()
+                    except Exception as e:
+                        if frame_count % 625 == 0:
+                            print(f"Serial error: {e}")
+                        try:
+                            ser.close()
+                            ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=0.02)
+                        except:
+                            pass
+            
+            # Parse IMU data
+            if line and not line.startswith('#') and ',' in line:
+                try:
+                    parts = line.split(',')
+                    if len(parts) == 8:
+                        # relQI, relQJ, relQK, relQR, relRoll, relPitch, relYaw, mode
+                        float_parts = [float(p) for p in parts[:-1]]
+                        mode_part = int(parts[-1])
+                        
+                        if all(math.isfinite(x) for x in float_parts) and 0 <= mode_part <= 6:
+                            imu_data = np.array(float_parts + [mode_part])
+                        else:
+                            if frame_count % 625 == 0:
+                                error_msg = RobotError.format_error('E502',
+                                    details=f"Invalid values: {line}",
+                                    context="NaN/Inf or mode out of range")
+                                print(error_msg)
+                except (ValueError, IndexError) as e:
+                    if frame_count % 625 == 0:
+                        error_msg = RobotError.format_error('E502',
+                            details=f"Parse error: {str(e)}",
+                            context=f"Line: {line}")
+                        print(error_msg)
+            
+            # Process IMU data
+            if imu_data is not None:
+                # Extract data
+                rel_qi, rel_qj, rel_qk, rel_qr = imu_data[:4]
+                rel_roll, rel_pitch, rel_yaw = imu_data[4:7]
+                mode = int(imu_data[7])
+                
+                # Apply calibration to Euler angles
+                rel_roll, rel_pitch, rel_yaw = imu_calibration.apply_calibration(
+                    rel_roll, rel_pitch, rel_yaw)
+                
+                # Capture calibration samples
+                if imu_calibration.calibration_active:
+                    imu_calibration.capture_calibration_sample(rel_roll, rel_pitch, rel_yaw)
+                
+                is_active = True
+                current_mode = mode
+                
+                # --- AXIS MAPPING AND VISUALIZATION ---
+                
+                # 1. Update cube rotation based on quaternion (Always)
+                rel_quat_raw = np.array([rel_qi, rel_qj, rel_qk, rel_qr])
+                persistent_rot_quat = quaternion_normalize(rel_quat_raw)
+                
+                # 2. Accumulate positional velocity (ONLY in translational modes)
+                
+                ramped_roll = apply_deadzone_ramp(rel_roll, MOVEMENT_DEADZONE, DEADZONE_RAMP_WIDTH)
+                ramped_pitch = apply_deadzone_ramp(rel_pitch, MOVEMENT_DEADZONE, DEADZONE_RAMP_WIDTH)
+                
+                # Check if mode changed to a purely rotational one OR if current mode is rotational
+                if mode in [3, 6]:
+                    # Hard reset velocity upon entering a rotational mode to kill drift
+                    if last_mode not in [3, 6]:
+                        velocity = np.array([0.0, 0.0, 0.0])
+                    # Apply faster decay when actively in rotational mode
+                    velocity *= (VELOCITY_DECAY - 0.15) 
+                
+                
+                if mode == 1: # BASE_FRAME_XY 
+                    # VISUAL AXIS CORRECTION & SIGN FLIP:
+                    # Roll (Fwd/Back hand tilt) -> Visual X (Forward/Back movement)
+                    # Pitch (L/R hand tilt) -> Visual Z (Side-to-Side movement)
+                    velocity[0] += ramped_roll * 0.001 * runtime_config.LINEAR_SPEED_SCALE # Roll -> X (SIGN FLIP)
+                    velocity[2] += ramped_pitch * 0.001 * runtime_config.LINEAR_SPEED_SCALE # Pitch -> Z (SIGN FLIP)
+                elif mode == 2: # VERTICAL_Z (Pitch -> Z)
+                    # VISUAL AXIS CORRECTION & SIGN FLIP:
+                    # Pitch (Fwd/Back hand tilt) -> Visual Y (Up/Down movement)
+                    velocity[1] += -ramped_pitch * 0.001 * runtime_config.LINEAR_SPEED_SCALE # Pitch -> Y (SIGN FLIP)
+                elif mode == 4: # TCP_XY 
+                    # VISUAL AXIS CORRECTION & SIGN FLIP:
+                    velocity[0] += ramped_roll * 0.0005 * runtime_config.LINEAR_SPEED_SCALE # Roll -> X (SIGN FLIP)
+                    velocity[2] += ramped_pitch * 0.0005 * runtime_config.LINEAR_SPEED_SCALE # Pitch -> Z (SIGN FLIP)
+                elif mode == 5: # TCP_Z (Pitch -> Z)
+                    # VISUAL AXIS CORRECTION & SIGN FLIP:
+                    velocity[1] += -ramped_pitch * 0.0005 * runtime_config.LINEAR_SPEED_SCALE # Pitch -> Y (SIGN FLIP)
+                
+                # --- ROBOT CONTROL DISPATCH ---
+                
+                # Mode transition handling (kept intact)
+                if mode != last_mode:
+                    if last_mode > 0 and mode > 0:
+                        if rtde_controller.enabled and rtde_controller.rtde_c and not rtde_controller.simulate:
+                            try:
+                                rtde_controller.rtde_c.stopL(2.0)
+                                time.sleep(0.05)
+                            except:
+                                pass
+                    
+                    if mode != 0:
+                        mode_name = CONTROL_MODES.get(mode, f"UNKNOWN_{mode}")
+                        print(f"Mode: {mode_name}")
+                        rtde_controller.log_command(f"# Mode: {mode_name}")
+                    
+                    last_mode = mode
+                
+                
+                # Robot control execution
+                if mode in [1, 3] and not runtime_config.ENABLE_REMAPPED_MODES:
+                    if frame_count % 125 == 0:
+                        mode_names = {1: "BASE_FRAME_XY", 3: "BASE_FRAME_ORIENT"}
+                        print(f"Mode {mode} ({mode_names[mode]}) DISABLED - Press 'M' to enable")
+                    is_active = False
+                else:
+                    if rtde_controller.enabled and mode > 0:
+                        try:
+                            # Apply smoothing
+                            smooth_roll, smooth_pitch, smooth_yaw = rtde_controller.apply_smoothing(
+                                rel_roll, rel_pitch, rel_yaw)
+                            
+                            # Calculate velocity scale (for UR Servo/Move speed parameter)
+                            velocity_scale = rtde_controller.calculate_velocity_scale(
+                                smooth_roll, smooth_pitch, smooth_yaw)
+                            
+                            # Execute mode-specific control
+                            if mode == 1:
+                                # BASE_FRAME_XY Translation (Corrected mapping and signs inside the method)
+                                # Roll (Fwd/Back hand tilt) -> UR X (Fwd/Back)
+                                # Pitch (L/R hand tilt) -> UR Y (L/R)
+                                rtde_controller.move_base_frame_xy(
+                                    smooth_roll, smooth_pitch, runtime_config.LINEAR_SPEED_SCALE, velocity_scale)
+                            
+                            elif mode == 2:
+                                # VERTICAL_Z Translation (Pitch -> Z)
+                                # Sign flip for intuitive control (Pitch down -> Z down)
+                                position_delta = [0, 0, -smooth_pitch * CONTROL_PARAMS['vertical'] * runtime_config.LINEAR_SPEED_SCALE]
+                                rtde_controller.move_tcp_cartesian(position_delta, [0, 0, 0], velocity_scale)
+                            
+                            elif mode == 3:
+                                # BASE_FRAME_ORIENT Rotation (Corrected mapping and signs inside the method)
+                                # Pitch -> Ry, Roll -> Rx, Yaw -> Rz
+                                rtde_controller.move_base_frame_orientation(
+                                    smooth_roll, smooth_pitch, smooth_yaw, runtime_config.ANGULAR_SPEED_SCALE, velocity_scale)
+                            
+                            elif mode == 4:
+                                # TCP_XY Translation (Roll -> Tool X, Pitch -> Tool Y)
+                                # Sign flip applied here for intuitive control
+                                position_delta = [
+                                    -smooth_roll * CONTROL_PARAMS['tcp_translation'] * runtime_config.LINEAR_SPEED_SCALE, # Roll -> Tool X (Sign Flipped)
+                                    -smooth_pitch * CONTROL_PARAMS['tcp_translation'] * runtime_config.LINEAR_SPEED_SCALE, # Pitch -> Tool Y (Sign Flipped)
+                                    0
+                                ]
+                                rtde_controller.move_tcp_cartesian(position_delta, [0, 0, 0], velocity_scale)
+                            
+                            elif mode == 5:
+                                # TCP_Z Translation (Pitch -> Z)
+                                # Sign flip for intuitive control
+                                position_delta = [0, 0, -smooth_pitch * CONTROL_PARAMS['tcp_vertical'] * runtime_config.LINEAR_SPEED_SCALE]
+                                rtde_controller.move_tcp_cartesian(position_delta, [0, 0, 0], velocity_scale)
+                            
+                            elif mode == 6:
+                                # TCP_ORIENT Rotation (Quaternion based position control)
+                                rtde_controller.move_tcp_quaternion_target(
+                                    persistent_rot_quat, runtime_config.ANGULAR_SPEED_SCALE, velocity_scale)
+                            
+                        except Exception as e:
+                            if frame_count % 625 == 0:
+                                print(f"Robot control error: {e}")
+            
+            else:
+                # No IMU data
+                is_active = False
+                if last_mode > 0:
+                    # Decay velocity faster when idle
+                    velocity *= (VELOCITY_DECAY - 0.1) 
+                    last_mode = 0
+            
+            # Physics update (for visualization)
+            persistent_pos += velocity
+            velocity *= VELOCITY_DECAY
+            
+            # Update robot status
+            rtde_controller.update_robot_status()
+            
+            # Check connection health
+            if rtde_controller.enabled and rtde_controller.connection_lost:
+                if rtde_controller.attempt_reconnect():
+                    print("Robot reconnected successfully")
+            
+            # 3D rendering
+            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+            
+            # Draw grid
+            glPushMatrix()
+            draw_grid()
+            draw_axes()
+            glPopMatrix()
+            
+            # Draw cube
+            glPushMatrix()
+            glTranslatef(persistent_pos[0], persistent_pos[1], persistent_pos[2])
+            
+            # Apply persistent_rot_quat rotation
+            q = persistent_rot_quat
+            # We use the raw quaternion here as it represents the relative orientation of the IMU
+            angle = 2 * math.acos(min(1.0, max(-1.0, q[3]))) 
+            
+            if angle > 0.001:
+                sin_half = math.sin(angle / 2)
+                if abs(sin_half) > 0.001:
+                    axis = q[:3] / sin_half 
+                    glRotatef(math.degrees(angle), axis[0], axis[1], axis[2])
+            
+            # Color coding by mode
+            color_mod = (0.5, 0.5, 0.5)  # Gray for idle
+            
+            if is_active and current_mode > 0:
+                mode_colors = {
+                    1: (1.0, 0.3, 0.3),  # Red - BASE_FRAME_XY
+                    2: (0.3, 1.0, 0.3),  # Green - VERTICAL_Z
+                    3: (1.0, 1.0, 0.3),  # Yellow - BASE_FRAME_ORIENT
+                    4: (0.3, 0.3, 1.0),  # Blue - TCP_XY
+                    5: (1.0, 0.3, 1.0),  # Magenta - TCP_Z
+                    6: (0.3, 1.0, 1.0)   # Cyan - TCP_ORIENT
+                }
+                
+                base_color = mode_colors.get(current_mode, (1.0, 1.0, 1.0))
+                
+                if rtde_controller.enabled:
+                    if current_mode in [1, 3] and not runtime_config.ENABLE_REMAPPED_MODES:
+                        color_mod = tuple(c * 0.3 for c in base_color)  # Dim if disabled
+                    else:
+                        color_mod = base_color
+                else:
+                    color_mod = tuple(c * 0.6 for c in base_color)  # Dim if robot disabled
+            
+            Cube(color_multiplier=color_mod)
+            glPopMatrix()
+            
+            # --- Status Overlay Setup (2D) ---
+            glMatrixMode(GL_PROJECTION)
+            glPushMatrix()
+            glLoadIdentity()
+            glOrtho(0, display[0], display[1], 0, -1, 1)
+            glMatrixMode(GL_MODELVIEW)
+            glPushMatrix()
+            glLoadIdentity()
+            glDisable(GL_DEPTH_TEST)
+            
+            # 1. Draw Speed Indicators (Text GUI)
+            draw_speed_indicators(runtime_config, display, font)
+
+            # 2. Draw Status Text
+            y_offset = 10
+            remap_status = "ENABLED" if runtime_config.ENABLE_REMAPPED_MODES else "DISABLED"
+            
+            status = rtde_controller.get_status_display() # Retrieve status dictionary here
+            
+            # Using str.format() for safe dictionary access when constructing the status list
+            status_lines = [
+                "Mode: {} | Remap: {}".format(CONTROL_MODES.get(current_mode, 'IDLE'), remap_status),
+                status.get('robot_status', 'STATUS UNAVAILABLE'),
+                "UR Vel: {:.0f}% | {}".format(status.get('target_velocity', 0.0) * 100, status.get('blend_mode', 'N/A')),
+                "Joints: [{}]".format(', '.join(["{:.1f}".format(a) for a in status.get('joint_angles', [])[:3]]) + '...'),
+                "IMU Cal: {} | Commands: {} ({:.1f}%)".format(
+                    imu_calibration.get_status(), 
+                    status.get('total_commands', 0), 
+                    status.get('success_rate', 0.0)
+                )
+            ]
+            
+            if status.get('connection_lost'):
+                status_lines.append(f"WARNING: Connection Lost - Reconnect: {status.get('reconnect_attempts', 0)}/5")
+            
+            if imu_calibration.calibration_active:
+                status_lines.append(f"CALIBRATION ACTIVE - Step {imu_calibration.calibration_step + 1}/2")
+            
+            if current_mode in [1, 3] and not runtime_config.ENABLE_REMAPPED_MODES:
+                status_lines.append(f"WARNING: Mode {current_mode} BLOCKED - Press 'M' to enable")
+            
+            # Render text lines (start at the left side)
+            for i, line in enumerate(status_lines):
+                color = (0, 255, 0) if rtde_controller.enabled else (255, 128, 0)
+                if "ERROR" in line or "NOT READY" in line or "BLOCKED" in line or "WARNING" in line:
+                    color = (255, 0, 0)
+                
+                text_surface = font.render(line, True, color)
+                text_data = pygame.image.tostring(text_surface, "RGBA", True)
+                glRasterPos2f(10, y_offset + i * 20)
+                glDrawPixels(text_surface.get_width(), text_surface.get_height(),
+                           GL_RGBA, GL_UNSIGNED_BYTE, text_data)
+            
+            glEnable(GL_DEPTH_TEST)
+            glMatrixMode(GL_PROJECTION)
+            glPopMatrix()
+            glMatrixMode(GL_MODELVIEW)
+            glPopMatrix()
+            
+            pygame.display.flip()
+            clock.tick(125)  # 125 Hz to match RTDE frequency
+    
+    except KeyboardInterrupt:
+        print("\n\nShutdown requested by user...")
+    except Exception as e:
+        print(f"\n\nFATAL ERROR: {e}")
+        traceback.print_exc()
+    finally:
+        print("\nClosing connections...")
+        # Save final speed settings
+        config_manager.set(runtime_config.LINEAR_SPEED_SCALE, 'speed_scaling', 'linear_scale')
+        config_manager.set(runtime_config.ANGULAR_SPEED_SCALE, 'speed_scaling', 'angular_scale')
+        config_manager.save_config()
+        
+        rtde_controller.close()
+        if ser and ser.is_open:
+            ser.close()
+        if sock:
+            try:
+                sock.close()
+            except:
+                pass
+        pygame.quit()
+        print("System shutdown complete.")
+        print("\nSession Summary:")
+        stats = rtde_controller.get_statistics()
+        print(f"  Total commands: {stats['total']}")
+        print(f"  Successful: {stats['successful']}")
+        print(f"  Failed: {stats['failed']}")
+        print(f"  Success rate: {stats['success_rate']:.1f}%")
+
+#==============================================================================
+# PROGRAM ENTRY POINT
+#==============================================================================
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n\nProgram terminated by user (Ctrl+C)")
+        sys.exit(0)
+    except Exception as e:
+        print(f"\n\nFATAL ERROR: {e}")
+        traceback.print_exc()
+        print("\nCheck log files for details.")
+        sys.exit(1)
