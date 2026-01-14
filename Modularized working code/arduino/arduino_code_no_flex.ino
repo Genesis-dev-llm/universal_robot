@@ -197,6 +197,7 @@ void loop() {
         }
         
         // Create data string: relQI,relQJ,relQK,relQR,relRoll,relPitch,relYaw,mode
+        // REMOVED: flex sensor value from end
         String dataString = String(relQI, 4) + "," + String(relQJ, 4) + "," + 
                            String(relQK, 4) + "," + String(relQR, 4) + "," +
                            String(relRoll, 2) + "," + String(relPitch, 2) + "," + 
@@ -215,4 +216,3 @@ void loop() {
     }
   }
 }
-

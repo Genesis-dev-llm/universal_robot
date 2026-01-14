@@ -56,7 +56,6 @@ class VisualizationState:
         self.current_mode = 0
         self.last_mode = -1
         self.visualizer_mode = 'CUBE' # 'CUBE' or 'ROBOT'
-        self.flex_value = 0 # 0-255 scale
     
     def update_from_imu(self, imu_data, runtime_config):
         """
@@ -68,7 +67,6 @@ class VisualizationState:
         """
         self.is_active = True
         self.current_mode = imu_data['mode']
-        self.flex_value = imu_data.get('flex', 0)
         
         # Update rotation from quaternion (with axis mapping)
         raw_quat = quaternion_normalize(imu_data['quaternion'])
@@ -173,10 +171,6 @@ class StatusBuilder:
         
         if imu_calibration.calibration_active:
             status_lines.append(f"CALIBRATION ACTIVE - Step {imu_calibration.calibration_step + 1}/2")
-        
-        # Add Gripper status
-        flex_pct = (vis_state.flex_value / 255.0) * 100
-        status_lines.append(f"Gripper: {flex_pct:.0f}% ({'CLOSED' if flex_pct > 80 else 'OPEN' if flex_pct < 20 else 'MOVING'})")
         
         return status_lines
 
