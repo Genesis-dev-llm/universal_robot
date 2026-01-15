@@ -14,7 +14,6 @@ bool wifiEnabled = false;
 #define BASE_ARM_PIN 13        // Base/Arm movement (extend/retract, left/right base rotation)
 #define VERTICAL_PIN 12        // Vertical movement (up/down using elbow)
 #define TCP_MODE_PIN 27        // TCP/Wrist mode (fine positioning and orientation)
-#define FLEX_PIN 33            // Flex sensor for gripper control
 
 BNO080 myIMU;
 
@@ -197,16 +196,11 @@ void loop() {
           relYaw = currentYaw - homeYaw;
         }
         
-        // Read Flex Sensor (0-4095 on ESP32, mapped to 0-255 for Robotiq)
-        int flexRaw = analogRead(FLEX_PIN);
-        int flexValue = map(flexRaw, 250, 0, 0, 255); // Calibrated range
-        flexValue = constrain(flexValue, 0, 255);
-
-        // Create data string: relQI,relQJ,relQK,relQR,relRoll,relPitch,yaw,mode,flex
+        // Create data string: relQI,relQJ,relQK,relQR,relRoll,relPitch,relYaw,mode
         String dataString = String(relQI, 4) + "," + String(relQJ, 4) + "," + 
                            String(relQK, 4) + "," + String(relQR, 4) + "," +
                            String(relRoll, 2) + "," + String(relPitch, 2) + "," + 
-                           String(relYaw, 2) + "," + String(mode) + "," + String(flexValue);
+                           String(relYaw, 2) + "," + String(mode);
         
         // Send data via both USB and WiFi
         Serial.println(dataString);

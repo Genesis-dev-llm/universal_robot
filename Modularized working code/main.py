@@ -1,6 +1,12 @@
 """
 Universal Robot RTDE Control with Wearable IMU
-Main Application Entry Point - Refactored and Modular
+Main Application Entry Point - Refactored with Universal Coordinate System
+
+Phase 1 & 2 Updates:
+- Fixed critical bugs (indentation, imports)
+- Implemented universal coordinate frame transform system
+- Removed flex sensor/gripper code
+- Cleaner axis mapping throughout
 
 Author: Refactored Version
 Date: 2025
@@ -24,7 +30,8 @@ from config.config_manager import ConfigManager, RuntimeConfig
 from core.error_handler import RobotError
 from core.imu_calibration import IMUCalibration
 from core.event_handler import EventHandler
-from core.math_utils import apply_deadzone_ramp, quaternion_normalize, apply_axis_mapping, apply_axis_mapping_quat
+from core.math_utils import apply_deadzone_ramp, quaternion_normalize
+from core.coordinate_frames import frame_transform  # NEW: Universal transform system
 
 # Import communication
 from communication.imu_interface import IMUInterface
@@ -55,8 +62,7 @@ class VisualizationState:
         self.is_active = False
         self.current_mode = 0
         self.last_mode = -1
-        self.visualizer_mode = 'CUBE' # 'CUBE' or 'ROBOT'
-        self.flex_value = 0 # 0-255 scale
+        self.visualizer_mode = 'CUBE'  # 'CUBE' or 'ROBOT'
     
     def update_from_imu(self, imu_data, runtime_config):
         """
@@ -68,11 +74,10 @@ class VisualizationState:
         """
         self.is_active = True
         self.current_mode = imu_data['mode']
-        self.flex_value = imu_data.get('flex', 0)
         
-        # Update rotation from quaternion (with axis mapping)
+        # Update rotation from quaternion using new coordinate transform
         raw_quat = quaternion_normalize(imu_data['quaternion'])
-        self.rotation_quat = apply_axis_mapping_quat(raw_quat, IMU_AXIS_MAPPING)
+        self.rotation_quat = frame_transform.apply_quaternion_mapping(raw_quat)
         
         # Extract Euler angles
         rel_roll, rel_pitch, rel_yaw = imu_data['euler']
@@ -82,8 +87,15 @@ class VisualizationState:
         ramped_pitch = apply_deadzone_ramp(rel_pitch, MOVEMENT_DEADZONE, DEADZONE_RAMP_WIDTH)
         ramped_yaw = apply_deadzone_ramp(rel_yaw, MOVEMENT_DEADZONE, DEADZONE_RAMP_WIDTH)
         
-        # Apply axis mapping (see config/constants.py IMU_AXIS_MAPPING)
-        mapped = apply_axis_mapping(ramped_roll, ramped_pitch, ramped_yaw, IMU_AXIS_MAPPING)
+        # Create IMU euler dict for transform
+        imu_euler = {
+            'roll': ramped_roll,
+            'pitch': ramped_pitch,
+            'yaw': ramped_yaw
+        }
+        
+        # Get visualization-frame deltas using new coordinate transform
+        viz_trans = frame_transform.to_robot_translation(imu_euler)
         
         # Reset velocity for rotational modes
         if self.current_mode in [3, 6]:
@@ -91,17 +103,17 @@ class VisualizationState:
                 self.velocity = np.array([0.0, 0.0, 0.0])
             self.velocity *= (VELOCITY_DECAY - 0.15)
         
-        # Update velocity based on mode using MAPPED axes
+        # Update velocity based on mode
         if self.current_mode == 1:  # BASE_FRAME_XY
-            self.velocity[0] += mapped['x'] * 0.001 * runtime_config.LINEAR_SPEED_SCALE
-            self.velocity[2] += mapped['y'] * 0.001 * runtime_config.LINEAR_SPEED_SCALE
+            self.velocity[0] += viz_trans['x'] * 0.001 * runtime_config.LINEAR_SPEED_SCALE
+            self.velocity[2] += viz_trans['y'] * 0.001 * runtime_config.LINEAR_SPEED_SCALE
         elif self.current_mode == 2:  # VERTICAL_Z
-            self.velocity[1] += mapped['z'] * 0.001 * runtime_config.LINEAR_SPEED_SCALE
+            self.velocity[1] += viz_trans['z'] * 0.001 * runtime_config.LINEAR_SPEED_SCALE
         elif self.current_mode == 4:  # TCP_XY
-            self.velocity[0] += mapped['x'] * 0.0005 * runtime_config.LINEAR_SPEED_SCALE
-            self.velocity[2] += mapped['y'] * 0.0005 * runtime_config.LINEAR_SPEED_SCALE
+            self.velocity[0] += viz_trans['x'] * 0.0005 * runtime_config.LINEAR_SPEED_SCALE
+            self.velocity[2] += viz_trans['y'] * 0.0005 * runtime_config.LINEAR_SPEED_SCALE
         elif self.current_mode == 5:  # TCP_Z
-            self.velocity[1] += mapped['z'] * 0.0005 * runtime_config.LINEAR_SPEED_SCALE
+            self.velocity[1] += viz_trans['z'] * 0.0005 * runtime_config.LINEAR_SPEED_SCALE
     
     def update_physics(self):
         """Update physics simulation"""
@@ -174,10 +186,6 @@ class StatusBuilder:
         if imu_calibration.calibration_active:
             status_lines.append(f"CALIBRATION ACTIVE - Step {imu_calibration.calibration_step + 1}/2")
         
-        # Add Gripper status
-        flex_pct = (vis_state.flex_value / 255.0) * 100
-        status_lines.append(f"Gripper: {flex_pct:.0f}% ({'CLOSED' if flex_pct > 80 else 'OPEN' if flex_pct < 20 else 'MOVING'})")
-        
         return status_lines
 
 #==============================================================================
@@ -194,6 +202,10 @@ def print_startup_info(config_manager, imu_calibration, imu_interface, runtime_c
         print(f"  Roll offset: {imu_calibration.zero_offsets['roll']:.2f}°")
         print(f"  Pitch offset: {imu_calibration.zero_offsets['pitch']:.2f}°")
         print(f"  Yaw offset: {imu_calibration.zero_offsets['yaw']:.2f}°")
+    print()
+    
+    # Print coordinate frame info
+    print(frame_transform.get_info())
     print()
     
     print("="*70)
@@ -249,7 +261,6 @@ def main():
     
     # Initialize visualization
     vis_state = VisualizationState()
-    # Initialize static resources and models
     SceneRenderer.initialize()
     scene_renderer = SceneRenderer()
     gui_overlay = GUIOverlay()
@@ -265,11 +276,11 @@ def main():
     graph_width = 210
     graph_height = 80
     graph_x = display_width - 220
-    graph_y_start = 180 # Below speed indicators
+    graph_y_start = 180
     
     lin_vel_graph = GraphRenderer("Linear Vel (m/s)", graph_x, graph_y_start, 
                                  graph_width, graph_height, color=(0, 255, 0), y_range=(0, 0.5))
-                                 
+    
     ang_vel_graph = GraphRenderer("Angular Vel (rad/s)", graph_x, graph_y_start + graph_height + 20, 
                                  graph_width, graph_height, color=(255, 255, 0), y_range=(0, 1.0))
     
@@ -279,7 +290,8 @@ def main():
         return
     
     # Initialize event handler
-    event_handler = EventHandler(config_manager, runtime_config, imu_calibration, rtde_controller, vis_state, control_dispatcher)
+    event_handler = EventHandler(config_manager, runtime_config, imu_calibration, 
+                                 rtde_controller, vis_state, control_dispatcher)
     
     # Print startup info
     print_startup_info(config_manager, imu_calibration, imu_interface, runtime_config)
@@ -378,7 +390,6 @@ def main():
             # Dual-mode rendering
             if vis_state.visualizer_mode == 'ROBOT':
                 # Draw Robot Model
-                # If connected, use actual joint angles. If simulation, use last known (or home)
                 joint_angles = rtde_controller.last_joint_positions
                 glPushMatrix()
                 scene_renderer.draw_robot(joint_angles)
@@ -387,9 +398,8 @@ def main():
                 # Draw ghost TCP for debugging
                 scene_renderer.render_cube_at_pose(
                     rtde_controller.current_tcp_pose[:3],
-                    [0, 0, 0, 1], # rotation not visualized here
-                    color_multiplier=(0.2, 1.0, 0.2) # Transparent green ghost
-                )
+                    [0, 0, 0, 1],
+                    color_multiplier=(0.2, 1.0, 0.2))
             else:
                 # Draw Cube (IMU orientation)
                 color_multiplier = vis_state.get_color_multiplier(runtime_config, rtde_controller.enabled)
@@ -398,18 +408,12 @@ def main():
             # 2D GUI overlay
             gui_overlay.setup_2d_projection(display)
             
-            # Draw speed indicators
-
-            
             # Draw status text
             status_lines = StatusBuilder.build_status_lines(
                 vis_state, rtde_controller, imu_calibration, runtime_config, control_dispatcher)
             gui_overlay.draw_status_text(status_lines, display)
             
-
-            
             # Render and update Graphs
-            # Get velocity magnitude
             current_lin_speed = np.linalg.norm(control_dispatcher.current_velocity)
             current_ang_speed = np.linalg.norm(control_dispatcher.current_angular_velocity)
             

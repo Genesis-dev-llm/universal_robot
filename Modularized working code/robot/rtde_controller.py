@@ -21,7 +21,6 @@ from config.constants import (
 try:
     import rtde_control
     import rtde_receive
-    from rtde_control import RobotiqGripper
     RTDE_AVAILABLE = True
 except ImportError:
     RTDE_AVAILABLE = False
@@ -50,7 +49,6 @@ class RTDEController:
         # RTDE interfaces
         self.rtde_c = None
         self.rtde_r = None
-        self.gripper = None
         
         # Safety checker
         self.safety_checker = SafetyChecker(log_file=None)
@@ -101,7 +99,6 @@ class RTDEController:
         # Initialize log file in logs/ folder
         import os
         os.makedirs("logs", exist_ok=True)
-        # Use fixed filename to prevent clutter
         log_filename = "logs/latest_session.log"
         try:
             self.log_file = open(log_filename, "w")
@@ -143,15 +140,6 @@ class RTDEController:
             self.connection_lost = False
             self.reconnect_attempts = 0
             
-            # 3. Initialize Gripper
-            try:
-                self.gripper = RobotiqGripper(self.robot_ip)
-                self.gripper.connect()
-                print("✅ RTDE: Robotiq Gripper connected")
-            except Exception as e:
-                print(f"⚠️ RTDE: Gripper not found or failed to connect: {e}")
-                self.gripper = None
-                
             return True
             
         except Exception as e:
@@ -202,8 +190,6 @@ class RTDEController:
             timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
             self.log_file.write(f"[{timestamp}] {command}\n")
             self.log_file.flush()
-    
-
     
     def update_robot_status(self):
         """Update robot status periodically"""
@@ -406,18 +392,14 @@ class RTDEController:
     
     def reset_to_home(self):
         """Reset robot to home position (Neutral/Bent arm)"""
-        # We don't update target_tcp_pose here because we are doing a joint move
-        # The update_robot_status() loop will pick up the new TCP pose once moved
         if self.enabled and not self.simulate and self.rtde_c:
             try:
-                # Use moveJ to go to neutral joint positions
-                # Speed=0.6 rad/s, Accel=0.6 rad/s^2 (Safe, controlled speed)
                 from config.constants import UR_NEUTRAL_JOINT_POSITIONS
                 self.rtde_c.moveJ(UR_NEUTRAL_JOINT_POSITIONS, 0.6, 0.6)
                 print("Robot moving to neutral home position")
             except Exception as e:
                 print(f"Reset to home error: {e}")
-
+        
         self.log_command("# Reset to home")
     
     def get_status_display(self):
@@ -455,18 +437,16 @@ class RTDEController:
         # Combine into 6D vector
         velocity_vector = list(linear_velocity) + list(angular_velocity)
         
-        # 1. Threshold Check (Suppression)
-        # Always allow stopping (zero velocity) if we were moving
+        # Threshold Check (Suppression)
         is_zero = all(v == 0 for v in velocity_vector)
         was_moving = self.last_sent_velocity is not None and any(v != 0 for v in self.last_sent_velocity)
         
         if self.last_sent_velocity is not None and not (is_zero and was_moving):
-            # Calculate max change across all axes
             max_delta = max(abs(v1 - v2) for v1, v2 in zip(velocity_vector, self.last_sent_velocity))
             if max_delta < self.VEL_DELTA_THRESHOLD:
-                return True # Suppress but return success
+                return True
         
-        # 2. Update state and timing
+        # Update state and timing
         self.last_sent_velocity = velocity_vector[:]
         self.last_command_time = current_time
         self.total_commands_sent += 1
@@ -485,10 +465,6 @@ class RTDEController:
             return False
         
         try:
-            # speedL(xd, a, t, aRot)
-            # xd: tool speed [m/s, rad/s]
-            # a: tool position acceleration [m/s^2]
-            # t: time [s] - set to 0.008 for real-time
             success = self.rtde_c.speedL(velocity_vector, acceleration, 0.008)
             
             if success:
@@ -504,7 +480,7 @@ class RTDEController:
             self.connection_lost = True
             self.failed_commands += 1
             return False
-            
+    
     def move_servo(self, target_pose, velocity=0.5, acceleration=0.5, lookahead_time=0.1, gain=300):
         """
         Execute servo command (servoL) to a specific target pose
@@ -521,18 +497,16 @@ class RTDEController:
         """
         current_time = time.time()
         
-        # Rate limiting (125Hz max for RTDE)
-        # 1. Threshold Check (Suppression)
+        # Threshold Check (Suppression)
         if self.last_sent_pose is not None:
-            # list conversion for math safety
             target_pose = list(target_pose)
             pos_delta = math.sqrt(sum((a - b)**2 for a, b in zip(target_pose[:3], self.last_sent_pose[:3])))
             orient_delta = math.sqrt(sum((a - b)**2 for a, b in zip(target_pose[3:6], self.last_sent_pose[3:6])))
             
             if pos_delta < self.POSE_DELTA_THRESHOLD and orient_delta < self.ORIENT_DELTA_THRESHOLD:
-                return True # Suppress jittery updates
+                return True
         
-        # 2. Update state and timing
+        # Update state and timing
         self.last_sent_pose = list(target_pose)
         self.last_command_time = current_time
         self.total_commands_sent += 1
@@ -544,7 +518,7 @@ class RTDEController:
                 print(pose_msg)
             self.failed_commands += 1
             return False
-            
+        
         # Kinematic checks
         if not self.simulate and self.rtde_r:
             limits_ok, limits_msg = self.safety_checker.check_joint_limits(target_pose)
@@ -571,9 +545,6 @@ class RTDEController:
             return False
         
         try:
-            # servoL(pose, vel, acc, time, lookahead_time, gain)
-            # time: time where the command is controlling the robot. The function is blocking for this time.
-            # We set time=0.008 to match our loop rate (non-blocking effectively)
             success = self.rtde_c.servoL(target_pose, velocity, acceleration, 0.008, lookahead_time, gain)
             
             if success:
@@ -589,26 +560,7 @@ class RTDEController:
             self.connection_lost = True
             self.failed_commands += 1
             return False
-
-    def move_gripper(self, position, speed=255, force=255):
-        """
-        Move Robotiq gripper to position (0-255)
-        
-        Args:
-            position: Target position (0=Open, 255=Closed)
-            speed: Movement speed (0-255)
-            force: Gripping force (0-255)
-        """
-        if not self.enabled or self.simulate or not self.gripper:
-            return False
-            
-        try:
-            self.gripper.move(position, speed, force)
-            return True
-        except Exception as e:
-            print(f"⚠️ Gripper error: {e}")
-            return False
-
+    
     def get_statistics(self):
         """Get performance statistics"""
         success_rate = (self.successful_commands / self.total_commands_sent * 100) if self.total_commands_sent > 0 else 0

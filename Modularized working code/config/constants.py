@@ -74,35 +74,30 @@ DEADZONE_RAMP_WIDTH = 5.0  # degrees - gradual ramp zone (5-10 deg)
 VELOCITY_DECAY = 0.95  # visualization smoothing
 
 #==============================================================================
-# IMU AXIS MAPPING
-# Maps IMU axes to movement axes. Adjust based on how BNO085 is mounted.
+# IMU AXIS MAPPING (DEPRECATED - Now handled by core/coordinate_frames.py)
 # 
-# Your current setup (based on your description):
-#   - BNO "pitch" = your hand's up/down tilt
-#   - BNO "roll" = your hand's left/right tilt  
-#   - BNO "yaw" = your hand's rotation (twist)
+# This configuration is kept for reference only.
+# The new universal coordinate transform system in core/coordinate_frames.py
+# now handles all axis mapping transparently.
 #
-# Options for each: 'roll', 'pitch', 'yaw'
-# Set invert to True to flip the direction
+# See core/coordinate_frames.py for the new mapping system.
 #==============================================================================
 
 IMU_AXIS_MAPPING = {
-    # For Mode 1 (BASE_FRAME_XY): which IMU axis moves X and Y?
-    'x_axis': 'roll',       # User Tilt Fwd/Back (reads as Roll) -> Robot X (Fwd/Back)
-    'x_invert': True,       # Inverted as requested (Fwd moves Fwd)
-    'y_axis': 'pitch',      # User Tilt Left/Right (reads as Pitch) -> Robot Y (Left/Right)
-    'y_invert': False,      # Inverted back (Left moves Left)
-    
-    # For Mode 2/5 (VERTICAL_Z): which IMU axis moves Z?
-    'z_axis': 'pitch',      # Up/down movement
-    'z_invert': False,      # Tilt-forward = move-up
-    
-    'rx_axis': 'pitch',     # User Tilt Left/Right -> Robot Roll (Tilt Sideways)
-    'rx_invert': False,     # Aligned with Y_AXIS (Left/Right)
-    'ry_axis': 'yaw',       # User Twist Wrist -> Robot Yaw (Shake Head)
-    'ry_invert': True,      # Inverted as requested
-    'rz_axis': 'roll',      # User Tilt Fwd/Back -> Robot Pitch (Nod Fwd/Back)
-    'rz_invert': False,     # Inverted as requested
+    # DEPRECATED: These values are no longer used by the system
+    # Kept for documentation purposes only
+    'x_axis': 'roll',
+    'x_invert': True,
+    'y_axis': 'pitch',
+    'y_invert': False,
+    'z_axis': 'pitch',
+    'z_invert': False,
+    'rx_axis': 'pitch',
+    'rx_invert': False,
+    'ry_axis': 'yaw',
+    'ry_invert': True,
+    'rz_axis': 'roll',
+    'rz_invert': False,
 }
 
 #==============================================================================

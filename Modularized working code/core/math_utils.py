@@ -35,32 +35,39 @@ def apply_deadzone_ramp(value, deadzone, ramp_width):
         # Outside ramp zone - full value
         return value
 
+#==============================================================================
+# DEPRECATED AXIS MAPPING FUNCTIONS
+# These are kept for backward compatibility only
+# New code should use core/coordinate_frames.py
+#==============================================================================
+
 def get_mapped_axis(euler_dict, axis_name, invert=False):
     """
+    DEPRECATED: Use core.coordinate_frames.frame_transform instead
+    
     Get the mapped IMU axis value based on configuration.
-    
-    Args:
-        euler_dict: Dictionary with 'roll', 'pitch', 'yaw' values
-        axis_name: Which axis to get ('roll', 'pitch', or 'yaw')
-        invert: Whether to invert the value
-    
-    Returns:
-        The mapped (and optionally inverted) value
     """
+    import warnings
+    warnings.warn(
+        "get_mapped_axis() is deprecated. Use core.coordinate_frames.frame_transform instead.",
+        DeprecationWarning,
+        stacklevel=2
+    )
     value = euler_dict.get(axis_name, 0.0)
     return -value if invert else value
 
 def apply_axis_mapping(roll, pitch, yaw, mapping):
     """
+    DEPRECATED: Use core.coordinate_frames.frame_transform instead
+    
     Apply IMU axis mapping configuration to remap and invert axes.
-    
-    Args:
-        roll, pitch, yaw: Raw IMU Euler angles
-        mapping: IMU_AXIS_MAPPING dict from constants
-    
-    Returns:
-        Dict with mapped values for x, y, z, rx, ry, rz movements
     """
+    import warnings
+    warnings.warn(
+        "apply_axis_mapping() is deprecated. Use core.coordinate_frames.frame_transform instead.",
+        DeprecationWarning,
+        stacklevel=2
+    )
     euler = {'roll': roll, 'pitch': pitch, 'yaw': yaw}
     
     return {
@@ -71,6 +78,29 @@ def apply_axis_mapping(roll, pitch, yaw, mapping):
         'ry': get_mapped_axis(euler, mapping['ry_axis'], mapping['ry_invert']),
         'rz': get_mapped_axis(euler, mapping['rz_axis'], mapping['rz_invert']),
     }
+
+def apply_axis_mapping_quat(q, mapping):
+    """
+    DEPRECATED: Use core.coordinate_frames.frame_transform instead
+    
+    Apply IMU axis mapping (swaps and inversions) to a quaternion.
+    """
+    import warnings
+    warnings.warn(
+        "apply_axis_mapping_quat() is deprecated. Use core.coordinate_frames.frame_transform instead.",
+        DeprecationWarning,
+        stacklevel=2
+    )
+    # Convert to Euler, apply mapping, convert back
+    rx, ry, rz = quat_to_euler(q)
+    
+    euler = {'roll': math.degrees(rx), 'pitch': math.degrees(ry), 'yaw': math.degrees(rz)}
+    
+    m_rx = math.radians(get_mapped_axis(euler, mapping['rx_axis'], mapping['rx_invert']))
+    m_ry = math.radians(get_mapped_axis(euler, mapping['ry_axis'], mapping['ry_invert']))
+    m_rz = math.radians(get_mapped_axis(euler, mapping['rz_axis'], mapping['rz_invert']))
+    
+    return euler_to_quat(m_rx, m_ry, m_rz)
 
 #==============================================================================
 # QUATERNION OPERATIONS
@@ -143,7 +173,6 @@ def rotation_vector_add(rv1, rv2):
     
     def quat_mult(q1, q2):
         """Multiply two quaternions"""
-        # q = [x, y, z, w]
         x1, y1, z1, w1 = q1[0], q1[1], q1[2], q1[3]
         x2, y2, z2, w2 = q2[0], q2[1], q2[2], q2[3]
         return [
@@ -157,6 +186,109 @@ def rotation_vector_add(rv1, rv2):
     q2 = rv_to_quat(rv2)
     q_result = quat_mult(q1, q2)
     return quaternion_to_rotation_vector(q_result)
+
+def quaternion_multiply(q1, q2):
+    """
+    Multiply two quaternions [i, j, k, w]
+    
+    Args:
+        q1, q2: Quaternions [i, j, k, w]
+    
+    Returns:
+        Product quaternion
+    """
+    x1, y1, z1, w1 = q1[0], q1[1], q1[2], q1[3]
+    x2, y2, z2, w2 = q2[0], q2[1], q2[2], q2[3]
+    return np.array([
+        w1*x2 + x1*w2 + y1*z2 - z1*y2,  # x
+        w1*y2 - x1*z2 + y1*w2 + z1*x2,  # y
+        w1*z2 + x1*y2 - y1*x2 + z1*w2,  # z
+        w1*w2 - x1*x2 - y1*y2 - z1*z2   # w
+    ])
+
+def quaternion_inverse(q):
+    """
+    Calculate inverse (conjugate for unit quaternions) of quaternion [i,j,k,w]
+    
+    Args:
+        q: Quaternion [i, j, k, w]
+    
+    Returns:
+        Inverse quaternion
+    """
+    q = np.array(q)
+    return np.array([-q[0], -q[1], -q[2], q[3]])
+
+def quaternion_difference(q1, q2):
+    """
+    Calculate rotation from q1 to q2 (delta quaternion)
+    Formula: q_delta = q2 * inverse(q1)
+    
+    Args:
+        q1, q2: Quaternions [i, j, k, w]
+    
+    Returns:
+        Difference quaternion
+    """
+    q1_inv = quaternion_inverse(q1)
+    return quaternion_multiply(q2, q1_inv)
+
+def quat_to_euler(q):
+    """
+    Convert quaternion to Euler angles (rx, ry, rz) in radians
+    Uses ZYX convention (yaw-pitch-roll)
+    
+    Args:
+        q: Quaternion [i, j, k, w]
+    
+    Returns:
+        Euler angles [rx, ry, rz] in radians
+    """
+    qi, qj, qk, qr = q[0], q[1], q[2], q[3]
+    
+    # Roll (x-axis rotation)
+    sinr_cosp = 2 * (qr * qi + qj * qk)
+    cosr_cosp = 1 - 2 * (qi**2 + qj**2)
+    rx = math.atan2(sinr_cosp, cosr_cosp)
+    
+    # Pitch (y-axis rotation)
+    sinp = 2 * (qr * qj - qk * qi)
+    if abs(sinp) >= 1:
+        ry = math.copysign(math.pi / 2, sinp)
+    else:
+        ry = math.asin(sinp)
+    
+    # Yaw (z-axis rotation)
+    siny_cosp = 2 * (qr * qk + qi * qj)
+    cosy_cosp = 1 - 2 * (qj**2 + qk**2)
+    rz = math.atan2(siny_cosp, cosy_cosp)
+    
+    return [rx, ry, rz]
+
+def euler_to_quat(roll, pitch, yaw):
+    """
+    Convert Euler angles (rad) to quaternion [i, j, k, w]
+    Uses ZYX convention (yaw-pitch-roll)
+    
+    Args:
+        roll, pitch, yaw: Angles in radians
+    
+    Returns:
+        Quaternion [i, j, k, w]
+    """
+    cr = math.cos(roll * 0.5)
+    sr = math.sin(roll * 0.5)
+    cp = math.cos(pitch * 0.5)
+    sp = math.sin(pitch * 0.5)
+    cy = math.cos(yaw * 0.5)
+    sy = math.sin(yaw * 0.5)
+
+    return np.array([
+        sr * cp * cy - cr * sp * sy,  # i (x)
+        cr * sp * cy + sr * cp * sy,  # j (y)
+        cr * cp * sy - sr * sp * cy,  # k (z)
+        cr * cp * cy + sr * sp * sy   # w (r)
+    ])
 
 #==============================================================================
 # COORDINATE TRANSFORMS
@@ -212,7 +344,7 @@ def is_valid_quaternion(q):
         return False
     # Check if nearly unit length (within tolerance)
     norm = np.linalg.norm(q)
-    return abs(norm - 1.0) < 0.1  # Allow some tolerance
+    return abs(norm - 1.0) < 0.1  # Allow some tolerance for transmission errors
 
 def calculate_angular_velocity(roll, pitch, yaw):
     """
@@ -225,101 +357,3 @@ def calculate_angular_velocity(roll, pitch, yaw):
         Angular velocity magnitude in degrees/s
     """
     return math.sqrt(roll**2 + pitch**2 + yaw**2)
-
-def quaternion_multiply(q1, q2):
-    """Multiply two quaternions [i, j, k, w]"""
-    # q = [x, y, z, w]
-    x1, y1, z1, w1 = q1[0], q1[1], q1[2], q1[3]
-    x2, y2, z2, w2 = q2[0], q2[1], q2[2], q2[3]
-    return np.array([
-        w1*x2 + x1*w2 + y1*z2 - z1*y2,  # x
-        w1*y2 - x1*z2 + y1*w2 + z1*x2,  # y
-        w1*z2 + x1*y2 - y1*x2 + z1*w2,  # z
-        w1*w2 - x1*x2 - y1*y2 - z1*z2   # w
-    ])
-
-def quaternion_inverse(q):
-    """
-    Calculate inverse (conjugate for unit quaternions) of quaternion [i,j,k,w].
-    """
-    q = np.array(q)
-    return np.array([-q[0], -q[1], -q[2], q[3]])
-
-def quaternion_difference(q1, q2):
-    """
-    Calculate rotation from q1 to q2 (delta quaternion).
-    Formula: q_delta = q2 * inverse(q1)
-    """
-    q1_inv = quaternion_inverse(q1)
-    return quaternion_multiply(q2, q1_inv)
-
-def apply_axis_mapping_quat(q, mapping):
-    """
-    Apply IMU axis mapping (swaps and inversions) to a quaternion.
-    This ensures absolute orientation (cube/mimic) follows same mapping as translations.
-    
-    Args:
-        q: Absolute quaternion [i, j, k, w]
-        mapping: IMU_AXIS_MAPPING dict
-        
-    Returns:
-        Mapped quaternion [i, j, k, w]
-    """
-    # 1. Convert to Euler
-    rx, ry, rz = quat_to_euler(q)
-    
-    # 2. Apply mapping logic similar to apply_axis_mapping
-    euler = {'roll': math.degrees(rx), 'pitch': math.degrees(ry), 'yaw': math.degrees(rz)}
-    
-    # Extract mapped values in degrees, then back to radians
-    m_rx = math.radians(get_mapped_axis(euler, mapping['rx_axis'], mapping['rx_invert']))
-    m_ry = math.radians(get_mapped_axis(euler, mapping['ry_axis'], mapping['ry_invert']))
-    m_rz = math.radians(get_mapped_axis(euler, mapping['rz_axis'], mapping['rz_invert']))
-    
-    # 3. Reconstruct mapped quaternion
-    return euler_to_quat(m_rx, m_ry, m_rz)
-
-def quat_to_euler(q):
-    """
-    Convert quaternion to Euler angles (rx, ry, rz) in radians.
-    Uses ZYX convention (yaw-pitch-roll).
-    """
-    qi, qj, qk, qr = q[0], q[1], q[2], q[3]
-    
-    # Roll (x-axis rotation)
-    sinr_cosp = 2 * (qr * qi + qj * qk)
-    cosr_cosp = 1 - 2 * (qi**2 + qj**2)
-    rx = math.atan2(sinr_cosp, cosr_cosp)
-    
-    # Pitch (y-axis rotation)
-    sinp = 2 * (qr * qj - qk * qi)
-    if abs(sinp) >= 1:
-        ry = math.copysign(math.pi / 2, sinp)
-    else:
-        ry = math.asin(sinp)
-    
-    # Yaw (z-axis rotation)
-    siny_cosp = 2 * (qr * qk + qi * qj)
-    cosy_cosp = 1 - 2 * (qj**2 + qk**2)
-    rz = math.atan2(siny_cosp, cosy_cosp)
-    
-    return [rx, ry, rz]
-
-def euler_to_quat(roll, pitch, yaw):
-    """
-    Convert Euler angles (rad) to quaternion [i, j, k, w].
-    Uses ZYX convention (yaw-pitch-roll).
-    """
-    cr = math.cos(roll * 0.5)
-    sr = math.sin(roll * 0.5)
-    cp = math.cos(pitch * 0.5)
-    sp = math.sin(pitch * 0.5)
-    cy = math.cos(yaw * 0.5)
-    sy = math.sin(yaw * 0.5)
-
-    return np.array([
-        sr * cp * cy - cr * sp * sy, # i (x)
-        cr * sp * cy + sr * cp * sy, # j (y)
-        cr * cp * sy - sr * sp * cy, # k (z)
-        cr * cp * cy + sr * sp * sy  # w (r)
-    ])

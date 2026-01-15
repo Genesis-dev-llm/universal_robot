@@ -37,17 +37,16 @@ class IMUDataParser:
         
         try:
             parts = line.split(',')
-            if len(parts) != 9:
+            if len(parts) != 8:  # Changed from 9 (removed flex)
                 if log_file:
                     RobotError.log_error(log_file, 'E502',
-                        details=f"Expected 9 values, got {len(parts)}",
+                        details=f"Expected 8 values, got {len(parts)}",
                         context=f"Line: {line}")
                 return None
             
             # Parse floats and ints
             float_parts = [float(p) for p in parts[:7]]
             mode_part = int(parts[7])
-            flex_part = int(parts[8])
             
             # Validate finite values
             if not all(math.isfinite(x) for x in float_parts):
@@ -64,8 +63,7 @@ class IMUDataParser:
             return {
                 'quaternion': np.array([rel_qi, rel_qj, rel_qk, rel_qr]),
                 'euler': np.array([rel_roll, rel_pitch, rel_yaw]),
-                'mode': mode_part,
-                'flex': flex_part
+                'mode': mode_part
             }
             
         except (ValueError, IndexError) as e:
