@@ -1,8 +1,6 @@
 """
 OpenGL 3D scene rendering
 Draws grid, axes, and IMU cube
-
-UPDATED: Cube rotation now uses pre-transformed quaternion from CoordinateTransformer
 """
 
 from OpenGL.GL import *
@@ -12,6 +10,7 @@ class SceneRenderer:
     """
     Handles 3D scene rendering for visualization
     """
+    
     
     _ur10_model = None
     
@@ -44,7 +43,8 @@ class SceneRenderer:
         if cls._ur10_model:
             cls._ur10_model.render(joint_angles)
         else:
-            pass  # Fallback if not initialized
+            # Fallback if not initialized
+            pass
 
     @staticmethod
     def draw_axes(length=2.0):
@@ -152,35 +152,25 @@ class SceneRenderer:
     @staticmethod
     def render_cube_at_pose(position, quaternion, color_multiplier=(1, 1, 1)):
         """
-        Render cube at specific position with quaternion rotation.
-        
-        UPDATED: Quaternion is now pre-transformed by CoordinateTransformer,
-        so we just apply it directly without additional mapping!
+        Render cube at specific position with quaternion rotation
         
         Args:
             position: [x, y, z] position
-            quaternion: [qi, qj, qk, qr] orientation (ALREADY TRANSFORMED!)
+            quaternion: [qi, qj, qk, qr] orientation
             color_multiplier: RGB color scaling tuple
         """
         glPushMatrix()
         glTranslatef(position[0], position[1], position[2])
         
-        # Apply quaternion rotation directly
-        # Safety: Normalize quaternion to prevent rendering errors
-        import numpy as np
-        q = np.array(quaternion)
-        norm = np.linalg.norm(q)
-        if norm > 0.001:  # Only apply if quaternion is valid
-            q = q / norm  # Normalize
-            
-            # Convert quaternion to axis-angle for OpenGL
-            angle = 2 * math.acos(min(1.0, max(-1.0, q[3])))
-            
-            if angle > 0.001:  # Only rotate if angle is significant
-                sin_half = math.sin(angle / 2)
-                if abs(sin_half) > 0.001:
-                    axis = q[:3] / sin_half
-                    glRotatef(math.degrees(angle), axis[0], axis[1], axis[2])
+        # Apply quaternion rotation
+        q = quaternion
+        angle = 2 * math.acos(min(1.0, max(-1.0, q[3])))
+        
+        if angle > 0.001:
+            sin_half = math.sin(angle / 2)
+            if abs(sin_half) > 0.001:
+                axis = q[:3] / sin_half
+                glRotatef(math.degrees(angle), axis[0], axis[1], axis[2])
         
         SceneRenderer.draw_cube(color_multiplier)
         glPopMatrix()

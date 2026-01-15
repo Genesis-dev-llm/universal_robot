@@ -1,264 +1,211 @@
 """
-Mathematical utilities for robot control
-Quaternion operations, coordinate transforms, filtering
-
-NOTE: Axis mapping functions removed - now handled by CoordinateTransformer
+Configuration constants for UR Robot RTDE + IMU Control System
+All hardware settings, limits, and control parameters
 """
 
-import numpy as np
 import math
-from config.constants import UR_LIMITS
 
 #==============================================================================
-# FILTERING FUNCTIONS
+# COMMUNICATION SETTINGS
 #==============================================================================
 
-def apply_deadzone_ramp(value, deadzone, ramp_width):
-    """
-    Apply deadzone with smooth ramping to avoid jerky motion
-    
-    Args:
-        value: Input value (degrees)
-        deadzone: Deadzone threshold (degrees)
-        ramp_width: Ramp transition width (degrees)
-    
-    Returns:
-        Filtered value with smooth ramping
-    """
-    abs_value = abs(value)
-    
-    if abs_value < deadzone:
-        return 0.0  # Inside deadzone
-    elif abs_value < deadzone + ramp_width:
-        # In ramp zone - linear interpolation
-        ramp_factor = (abs_value - deadzone) / ramp_width
-        return value * ramp_factor
-    else:
-        # Outside ramp zone - full value
-        return value
+SERIAL_PORT = '/dev/ttyUSB0'  # Linux/Mac: /dev/ttyUSB0, Windows: COM3
+BAUD_RATE = 115200
+WIFI_HOST = '192.168.4.1'
+WIFI_PORT = 3333
+USE_WIFI = False  # Set True for WiFi, False for USB
 
 #==============================================================================
-# QUATERNION OPERATIONS
+# UNIVERSAL ROBOT SETTINGS
 #==============================================================================
 
-def quaternion_normalize(q):
-    """
-    Normalize quaternion to unit length
-    
-    Args:
-        q: Quaternion array [i, j, k, w] or [x, y, z, w]
-    
-    Returns:
-        Normalized quaternion
-    """
-    norm = np.linalg.norm(q)
-    return q / norm if norm > 0.0001 else np.array([0, 0, 0, 1])
+UR_ROBOT_IP = "192.168.1.100"
+UR_ENABLED = False  # Set True to enable robot control
+UR_SIMULATE = True  # Set False for real robot commands
 
-def quaternion_to_rotation_vector(q):
-    """
-    Convert quaternion [i,j,k,w] to UR rotation vector [rx,ry,rz]
-    UR uses axis-angle representation
-    
-    Args:
-        q: Quaternion [i, j, k, w]
-    
-    Returns:
-        Rotation vector [rx, ry, rz] in radians
-    """
-    q = quaternion_normalize(q)
-    i, j, k, w = q[0], q[1], q[2], q[3]
-    
-    # Ensure w is in valid range
-    w = max(-1.0, min(1.0, w))
-    
-    # Calculate angle
-    angle = 2 * math.acos(w)
-    
-    if abs(angle) < 0.001:
-        return [0.0, 0.0, 0.0]
-    
-    sin_half = math.sin(angle / 2)
-    if abs(sin_half) < 0.001:
-        return [0.0, 0.0, 0.0]
-    
-    # Axis vector (normalized i, j, k components) scaled by the angle
-    return [i * angle / sin_half, j * angle / sin_half, k * angle / sin_half]
+# UR Joint Limits (radians) - UR5/UR10 typical values
+UR_JOINT_LIMITS = {
+    'joint_0': (-2*math.pi, 2*math.pi),
+    'joint_1': (-math.pi, math.pi),
+    'joint_2': (-math.pi, math.pi),
+    'joint_3': (-math.pi, math.pi),
+    'joint_4': (-math.pi, math.pi),
+    'joint_5': (-2*math.pi, 2*math.pi),
+}
 
-def rotation_vector_add(rv1, rv2):
-    """
-    Add two rotation vectors via quaternion multiplication.
-    Converts to quaternions, multiplies, converts back.
-    
-    Args:
-        rv1: First rotation vector [rx, ry, rz]
-        rv2: Second rotation vector [rx, ry, rz]
-    
-    Returns:
-        Combined rotation vector [rx, ry, rz]
-    """
-    def rv_to_quat(rv):
-        """Convert rotation vector to quaternion"""
-        angle = np.linalg.norm(rv)
-        if angle < 0.001:
-            return [0, 0, 0, 1]
-        axis = np.array(rv) / angle
-        half_angle = angle / 2
-        sin_half = math.sin(half_angle)
-        return [axis[0]*sin_half, axis[1]*sin_half, axis[2]*sin_half, math.cos(half_angle)]
-    
-    def quat_mult(q1, q2):
-        """Multiply two quaternions"""
-        # q = [x, y, z, w]
-        x1, y1, z1, w1 = q1[0], q1[1], q1[2], q1[3]
-        x2, y2, z2, w2 = q2[0], q2[1], q2[2], q2[3]
-        return [
-            w1*x2 + x1*w2 + y1*z2 - z1*y2,  # x
-            w1*y2 - x1*z2 + y1*w2 + z1*x2,  # y
-            w1*z2 + x1*y2 - y1*x2 + z1*w2,  # z
-            w1*w2 - x1*x2 - y1*y2 - z1*z2   # w
-        ]
-    
-    q1 = rv_to_quat(rv1)
-    q2 = rv_to_quat(rv2)
-    q_result = quat_mult(q1, q2)
-    return quaternion_to_rotation_vector(q_result)
+# UR Workspace limits (meters, relative to robot base)
+UR_LIMITS = {
+    'x_min': -0.85, 'x_max': 0.85,
+    'y_min': -0.85, 'y_max': 0.85,
+    'z_min': 0.05, 'z_max': 1.2
+}
 
-def quaternion_multiply(q1, q2):
-    """Multiply two quaternions [i, j, k, w]"""
-    # q = [x, y, z, w]
-    x1, y1, z1, w1 = q1[0], q1[1], q1[2], q1[3]
-    x2, y2, z2, w2 = q2[0], q2[1], q2[2], q2[3]
-    return np.array([
-        w1*x2 + x1*w2 + y1*z2 - z1*y2,  # x
-        w1*y2 - x1*z2 + y1*w2 + z1*x2,  # y
-        w1*z2 + x1*y2 - y1*x2 + z1*w2,  # z
-        w1*w2 - x1*x2 - y1*y2 - z1*z2   # w
-    ])
+# UR Control parameters
+UR_BASE_POSITION = [0.4, 0.0, 0.6]  # Starting TCP position [x, y, z] in meters
+UR_BASE_ORIENTATION = [0.0, 0.0, 0.0]  # Starting orientation [rx, ry, rz] rotation vector
 
-def quaternion_inverse(q):
-    """
-    Calculate inverse (conjugate for unit quaternions) of quaternion [i,j,k,w].
-    """
-    q = np.array(q)
-    return np.array([-q[0], -q[1], -q[2], q[3]])
+# Neutral "Home" Position (Bent arm, safe for restart)
+# [Base, Shoulder, Elbow, Wrist1, Wrist2, Wrist3] in radians
+UR_NEUTRAL_JOINT_POSITIONS = [0, -1.57, -1.57, -1.57, 1.57, 0]
 
-def quaternion_difference(q1, q2):
-    """
-    Calculate rotation from q1 to q2 (delta quaternion).
-    Formula: q_delta = q2 * inverse(q1)
-    """
-    q1_inv = quaternion_inverse(q1)
-    return quaternion_multiply(q2, q1_inv)
-
-def quat_to_euler(q):
-    """
-    Convert quaternion to Euler angles (rx, ry, rz) in radians.
-    Uses ZYX convention (yaw-pitch-roll).
-    """
-    qi, qj, qk, qr = q[0], q[1], q[2], q[3]
-    
-    # Roll (x-axis rotation)
-    sinr_cosp = 2 * (qr * qi + qj * qk)
-    cosr_cosp = 1 - 2 * (qi**2 + qj**2)
-    rx = math.atan2(sinr_cosp, cosr_cosp)
-    
-    # Pitch (y-axis rotation)
-    sinp = 2 * (qr * qj - qk * qi)
-    if abs(sinp) >= 1:
-        ry = math.copysign(math.pi / 2, sinp)
-    else:
-        ry = math.asin(sinp)
-    
-    # Yaw (z-axis rotation)
-    siny_cosp = 2 * (qr * qk + qi * qj)
-    cosy_cosp = 1 - 2 * (qj**2 + qk**2)
-    rz = math.atan2(siny_cosp, cosy_cosp)
-    
-    return [rx, ry, rz]
-
-def euler_to_quat(roll, pitch, yaw):
-    """
-    Convert Euler angles (rad) to quaternion [i, j, k, w].
-    Uses ZYX convention (yaw-pitch-roll).
-    """
-    cr = math.cos(roll * 0.5)
-    sr = math.sin(roll * 0.5)
-    cp = math.cos(pitch * 0.5)
-    sp = math.sin(pitch * 0.5)
-    cy = math.cos(yaw * 0.5)
-    sy = math.sin(yaw * 0.5)
-
-    return np.array([
-        sr * cp * cy - cr * sp * sy, # i (x)
-        cr * sp * cy + sr * cp * sy, # j (y)
-        cr * cp * sy - sr * sp * cy, # k (z)
-        cr * cp * cy + sr * sp * sy  # w (r)
-    ])
+UR_MAX_VELOCITY = 0.25  # m/s
+UR_MAX_ACCELERATION = 1.2  # m/s²
+UR_JOINT_VELOCITY = 1.05  # rad/s
+UR_JOINT_ACCELERATION = 1.4  # rad/s²
 
 #==============================================================================
-# COORDINATE TRANSFORMS
+# CONTROL PARAMETERS
 #==============================================================================
 
-def clamp_position(pos):
-    """
-    Clamp position to workspace limits
-    
-    Args:
-        pos: Position [x, y, z] in meters
-    
-    Returns:
-        Clamped position within workspace
-    """
-    return [
-        max(UR_LIMITS['x_min'], min(UR_LIMITS['x_max'], pos[0])),
-        max(UR_LIMITS['y_min'], min(UR_LIMITS['y_max'], pos[1])),
-        max(UR_LIMITS['z_min'], min(UR_LIMITS['z_max'], pos[2]))
-    ]
+# Control parameters (meters per degree for translation, radians per degree for rotation)
+CONTROL_PARAMS = {
+    'base_translation': 0.002,
+    'base_rotation': 0.01,
+    'vertical': 0.002,
+    'tcp_translation': 0.0005,
+    'tcp_vertical': 0.0005,
+    'tcp_orientation': 0.005,
+    'robot_orientation': 0.008,
+}
+
+# Movement filtering parameters
+MOVEMENT_DEADZONE = 5.0  # degrees - no movement below this
+DEADZONE_RAMP_WIDTH = 5.0  # degrees - gradual ramp zone (5-10 deg)
+VELOCITY_DECAY = 0.95  # visualization smoothing
 
 #==============================================================================
-# VALIDATION UTILITIES
+# IMU AXIS MAPPING
+# Maps IMU axes to movement axes. Adjust based on how BNO085 is mounted.
+# 
+# Your current setup (based on your description):
+#   - BNO "pitch" = your hand's up/down tilt
+#   - BNO "roll" = your hand's left/right tilt  
+#   - BNO "yaw" = your hand's rotation (twist)
+#
+# Options for each: 'roll', 'pitch', 'yaw'
+# Set invert to True to flip the direction
 #==============================================================================
 
-def is_valid_pose(pose):
-    """
-    Check if pose data is valid (no NaN, Inf, correct length)
+IMU_AXIS_MAPPING = {
+    # For Mode 1 (BASE_FRAME_XY): which IMU axis moves X and Y?
+    'x_axis': 'roll',       # User Tilt Fwd/Back (reads as Roll) -> Robot X (Fwd/Back)
+    'x_invert': True,       # Inverted as requested (Fwd moves Fwd)
+    'y_axis': 'pitch',      # User Tilt Left/Right (reads as Pitch) -> Robot Y (Left/Right)
+    'y_invert': False,      # Inverted back (Left moves Left)
     
-    Args:
-        pose: Pose array [x, y, z, rx, ry, rz]
+    # For Mode 2/5 (VERTICAL_Z): which IMU axis moves Z?
+    'z_axis': 'pitch',      # Up/down movement
+    'z_invert': False,      # Tilt-forward = move-up
     
-    Returns:
-        True if valid, False otherwise
-    """
-    if len(pose) != 6:
-        return False
-    return all(math.isfinite(x) for x in pose)
+    'rx_axis': 'pitch',     # User Tilt Left/Right -> Robot Roll (Tilt Sideways)
+    'rx_invert': False,     # Aligned with Y_AXIS (Left/Right)
+    'ry_axis': 'yaw',       # User Twist Wrist -> Robot Yaw (Shake Head)
+    'ry_invert': True,      # Inverted as requested
+    'rz_axis': 'roll',      # User Tilt Fwd/Back -> Robot Pitch (Nod Fwd/Back)
+    'rz_invert': False,     # Inverted as requested
+}
 
-def is_valid_quaternion(q):
-    """
-    Check if quaternion is valid
-    
-    Args:
-        q: Quaternion [i, j, k, w]
-    
-    Returns:
-        True if valid, False otherwise
-    """
-    if len(q) != 4:
-        return False
-    if not all(math.isfinite(x) for x in q):
-        return False
-    # Check if roughly unit length (allow some tolerance)
-    norm = np.linalg.norm(q)
-    return abs(norm - 1.0) < 0.2  # Allow 20% tolerance for transmission errors
+#==============================================================================
+# CONTROL MODES
+#==============================================================================
 
-def calculate_angular_velocity(roll, pitch, yaw):
-    """
-    Calculate total angular velocity magnitude
+CONTROL_MODES = {
+    0: "IDLE",
+    1: "BASE_FRAME_XY",      # Remapped: XY translation in base frame
+    2: "VERTICAL_Z",         # Vertical movement
+    3: "BASE_FRAME_ORIENT",  # Remapped: Orientation control in base frame (Rx, Ry, Rz)
+    4: "TCP_XY",             # Fine TCP XY positioning
+    5: "TCP_Z",              # Fine TCP vertical
+    6: "TCP_ORIENT"          # TCP orientation control
+}
+
+#==============================================================================
+# SAFETY THRESHOLDS
+#==============================================================================
+
+# Singularity thresholds (radians)
+WRIST_SINGULARITY_THRESHOLD = 0.15
+SHOULDER_SINGULARITY_THRESHOLD = 0.15
+ELBOW_SINGULARITY_THRESHOLD = 0.1
+
+# Joint safety margin (radians)
+JOINT_SAFETY_MARGIN = 0.05  # ~3 degrees
+
+# Connection settings
+MAX_RECONNECT_ATTEMPTS = 5
+RECONNECT_COOLDOWN = 2.0  # seconds
+STATE_UPDATE_INTERVAL = 0.1  # seconds
+RTDE_MAX_FREQUENCY = 0.008  # 125Hz (8ms period)
+
+#==============================================================================
+# VISUALIZATION SETTINGS
+#==============================================================================
+
+DEFAULT_WINDOW_WIDTH = 1200
+DEFAULT_WINDOW_HEIGHT = 800
+DEFAULT_CAMERA_DISTANCE = 20.0
+TARGET_FPS = 125  # Match RTDE frequency
+
+#==============================================================================
+# ERROR CODES
+#==============================================================================
+
+ERROR_CODES = {
+    # Connection errors (E1xx)
+    'E101': 'RTDE Connection Error',
+    'E102': 'RTDE Connection Failed',
+    'E103': 'Connection Recovery Failed',
+    'E104': 'Serial Connection Failed',
+    'E105': 'WiFi Connection Failed',
     
-    Args:
-        roll, pitch, yaw: Euler angles in degrees
+    # Robot state errors (E2xx)
+    'E201': 'Robot Not in Running Mode',
+    'E202': 'Protective Stop Active',
+    'E203': 'Emergency Stop Active',
+    'E204': 'Robot in Backdrive Mode',
+    'E205': 'Safety System Error',
     
-    Returns:
-        Angular velocity magnitude in degrees/s
-    """
-    return math.sqrt(roll**2 + pitch**2 + yaw**2)
+    # Motion safety errors (E3xx)
+    'E301': 'Joint Limit Violation',
+    'E302': 'Singularity Detected',
+    'E303': 'Workspace Boundary Violation',
+    'E304': 'Inverse Kinematics Failed',
+    'E305': 'Velocity Limit Exceeded',
+    
+    # Data errors (E4xx)
+    'E401': 'Invalid Pose Data',
+    'E402': 'Invalid Joint Configuration',
+    
+    # IMU errors (E5xx)
+    'E501': 'IMU Communication Error',
+    'E502': 'IMU Data Parse Error',
+    'E503': 'IMU Calibration Error',
+}
+
+# Robot mode names for diagnostics
+ROBOT_MODE_NAMES = {
+    -1: "Disconnected", 
+    0: "Confirm Safety", 
+    1: "Booting",
+    2: "Power Off", 
+    3: "Power On", 
+    4: "Idle", 
+    5: "Backdrive",
+    6: "Running", 
+    7: "Running", 
+    8: "Updating Firmware"
+}
+
+# Safety mode names for diagnostics
+SAFETY_MODE_NAMES = {
+    0: "Undefined", 
+    1: "Normal", 
+    2: "Reduced",
+    3: "Protective Stop", 
+    4: "Recovery", 
+    5: "Safeguard Stop",
+    6: "System Emergency Stop", 
+    7: "Robot Emergency Stop",
+    8: "Violation", 
+    9: "Fault"
+}

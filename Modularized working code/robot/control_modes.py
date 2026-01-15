@@ -41,6 +41,10 @@ class ControlModeDispatcher:
         # Input Hysteresis (Command Suppression)
         self.last_input_angles = None
         self.INPUT_THRESHOLD = 3.0 # degrees
+
+        # Flex Sensor (Gripper) state
+        self.last_flex_value = None
+        self.FLEX_THRESHOLD = 5 # 0-255 scale
     
     def get_mode_name(self, mode_id):
         """Get human-readable name for mode"""
@@ -63,6 +67,15 @@ class ControlModeDispatcher:
             self.mimic_ref_robot_pose = None
             self.last_mode = mode
             
+        # 1. Process Flex Sensor (Gripper) - works in all modes
+        flex_value = imu_data.get('flex', None)
+        if flex_value is not None:
+            if self.last_flex_value is None or abs(flex_value - self.last_flex_value) >= self.FLEX_THRESHOLD:
+                # Perform gripper move command
+                # Note: Robotiq .move(pos, speed, force)
+                self.rtde_controller.move_gripper(flex_value)
+                self.last_flex_value = flex_value
+
         if mode == 0:
             return
             

@@ -21,6 +21,7 @@ from config.constants import (
 try:
     import rtde_control
     import rtde_receive
+    from rtde_control import RobotiqGripper
     RTDE_AVAILABLE = True
 except ImportError:
     RTDE_AVAILABLE = False
@@ -49,6 +50,7 @@ class RTDEController:
         # RTDE interfaces
         self.rtde_c = None
         self.rtde_r = None
+        self.gripper = None
         
         # Safety checker
         self.safety_checker = SafetyChecker(log_file=None)
@@ -141,6 +143,15 @@ class RTDEController:
             self.connection_lost = False
             self.reconnect_attempts = 0
             
+            # 3. Initialize Gripper
+            try:
+                self.gripper = RobotiqGripper(self.robot_ip)
+                self.gripper.connect()
+                print("✅ RTDE: Robotiq Gripper connected")
+            except Exception as e:
+                print(f"⚠️ RTDE: Gripper not found or failed to connect: {e}")
+                self.gripper = None
+                
             return True
             
         except Exception as e:
@@ -577,6 +588,25 @@ class RTDEController:
             print(f"RTDE servoL error: {e}")
             self.connection_lost = True
             self.failed_commands += 1
+            return False
+
+    def move_gripper(self, position, speed=255, force=255):
+        """
+        Move Robotiq gripper to position (0-255)
+        
+        Args:
+            position: Target position (0=Open, 255=Closed)
+            speed: Movement speed (0-255)
+            force: Gripping force (0-255)
+        """
+        if not self.enabled or self.simulate or not self.gripper:
+            return False
+            
+        try:
+            self.gripper.move(position, speed, force)
+            return True
+        except Exception as e:
+            print(f"⚠️ Gripper error: {e}")
             return False
 
     def get_statistics(self):
