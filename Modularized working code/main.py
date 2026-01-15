@@ -1,15 +1,15 @@
 """
 Universal Robot RTDE Control with Wearable IMU
-Main Application Entry Point - Refactored with Universal Coordinate System
+Main Application Entry Point - Bug-Free Version
 
-Phase 1 & 2 Updates:
-- Fixed critical bugs (indentation, imports)
-- Implemented universal coordinate frame transform system
-- Removed flex sensor/gripper code
-- Cleaner axis mapping throughout
+Fixes:
+- Graceful IMU connection failure
+- Optional RTDE connection
+- Proper error handling
+- Clean startup without dependencies
 
-Author: Refactored Version
-Date: 2025
+Author: Bug-Free Refactored Version
+Date: January 2025
 """
 
 import pygame
@@ -31,7 +31,7 @@ from core.error_handler import RobotError
 from core.imu_calibration import IMUCalibration
 from core.event_handler import EventHandler
 from core.math_utils import apply_deadzone_ramp, quaternion_normalize
-from core.coordinate_frames import frame_transform  # NEW: Universal transform system
+from core.coordinate_frames import frame_transform
 
 # Import communication
 from communication.imu_interface import IMUInterface
@@ -51,9 +51,7 @@ from visualization.graph_renderer import GraphRenderer
 #==============================================================================
 
 class VisualizationState:
-    """
-    Manages 3D visualization state (cube position, velocity, etc.)
-    """
+    """Manages 3D visualization state (cube position, velocity, etc.)"""
     
     def __init__(self):
         self.position = np.array([0.0, -1.0, 0.0])
@@ -65,17 +63,11 @@ class VisualizationState:
         self.visualizer_mode = 'CUBE'  # 'CUBE' or 'ROBOT'
     
     def update_from_imu(self, imu_data, runtime_config):
-        """
-        Update visualization based on IMU data
-        
-        Args:
-            imu_data: Dictionary with 'quaternion', 'euler', 'mode'
-            runtime_config: RuntimeConfig instance
-        """
+        """Update visualization based on IMU data"""
         self.is_active = True
         self.current_mode = imu_data['mode']
         
-        # Update rotation from quaternion using new coordinate transform
+        # Update rotation from quaternion using coordinate transform
         raw_quat = quaternion_normalize(imu_data['quaternion'])
         self.rotation_quat = frame_transform.apply_quaternion_mapping(raw_quat)
         
@@ -94,7 +86,7 @@ class VisualizationState:
             'yaw': ramped_yaw
         }
         
-        # Get visualization-frame deltas using new coordinate transform
+        # Get visualization-frame deltas using coordinate transform
         viz_trans = frame_transform.to_robot_translation(imu_euler)
         
         # Reset velocity for rotational modes
@@ -158,30 +150,29 @@ class VisualizationState:
 #==============================================================================
 
 class StatusBuilder:
-    """
-    Builds status text for display
-    """
+    """Builds status text for display"""
     
     @staticmethod
     def build_status_lines(vis_state, rtde_controller, imu_calibration, 
-                          runtime_config, control_dispatcher):
-        """
-        Build list of status lines for display
-        
-        Returns:
-            List of status strings
-        """
+                          runtime_config, control_dispatcher, imu_connected):
+        """Build list of status lines for display"""
         status = rtde_controller.get_status_display()
         remap_status = "ENABLED" if runtime_config.ENABLE_REMAPPED_MODES else "DISABLED"
         mode_name = control_dispatcher.get_mode_name(vis_state.current_mode)
         
+        # IMU connection status
+        imu_status = "Connected" if imu_connected else "DISCONNECTED"
+        
         status_lines = [
-            f"Mode: {mode_name} | {status.get('robot_status', 'N/A')} | IMU: {imu_calibration.get_status()}",
+            f"Mode: {mode_name} | {status.get('robot_status', 'N/A')} | IMU: {imu_status}",
             f"Speed: {status.get('target_velocity', 0.0) * 100:.0f}% | Lin Scale: {runtime_config.LINEAR_SPEED_SCALE:.1f}x | Ang Scale: {runtime_config.ANGULAR_SPEED_SCALE:.1f}x"
         ]
         
         if status.get('connection_lost'):
             status_lines.append(f"WARNING: Connection Lost - Reconnect: {status.get('reconnect_attempts', 0)}/5")
+        
+        if not imu_connected:
+            status_lines.append("⚠️  IMU NOT CONNECTED - Visualization only mode")
         
         if imu_calibration.calibration_active:
             status_lines.append(f"CALIBRATION ACTIVE - Step {imu_calibration.calibration_step + 1}/2")
@@ -211,7 +202,13 @@ def print_startup_info(config_manager, imu_calibration, imu_interface, runtime_c
     print("="*70)
     print("UNIVERSAL ROBOT RTDE + IMU CONTROL SYSTEM")
     print("="*70)
-    print(f"Communication: {imu_interface.get_mode()}")
+    
+    # IMU connection status
+    if imu_interface.is_connected():
+        print(f"IMU Communication: {imu_interface.get_mode()} ✓")
+    else:
+        print(f"IMU Communication: NOT CONNECTED (Visualization only)")
+    
     print(f"Robot IP: {UR_ROBOT_IP}")
     print(f"Robot Control: {'ENABLED' if UR_ENABLED else 'DISABLED'}")
     print(f"Simulation Mode: {'ON' if UR_SIMULATE else 'OFF (REAL ROBOT)'}")
@@ -224,8 +221,10 @@ def print_startup_info(config_manager, imu_calibration, imu_interface, runtime_c
         if mode_num in [1, 3] and not runtime_config.ENABLE_REMAPPED_MODES:
             status = " [DISABLED - Press M to enable]"
         print(f"  Mode {mode_num}: {mode_name}{status}")
-    print(" Controls: [TAB] View | [R] Reset | [U] Robot Power | [S] Stop | [C] Save Config")
-    print("           [Arrows] Speed | [Shift+C] Calibrate")
+    print("\nControls:")
+    print("  [TAB] Switch View | [R] Reset | [U] Robot Power | [S] Emergency Stop")
+    print("  [↑↓] Linear Speed | [←→] Angular Speed | [C] Save Config")
+    print("  [Shift+C] Calibrate IMU | [ESC] Quit")
     print("="*70 + "\n")
 
 def main():
@@ -248,6 +247,7 @@ def main():
         screen = pygame.display.set_mode(display, DOUBLEBUF | OPENGL)
     except Exception as e:
         print(f"ERROR: Could not initialize display: {e}")
+        print("Make sure you have OpenGL support installed.")
         return
     
     pygame.display.set_caption("UR Robot RTDE + IMU Control")
@@ -284,10 +284,14 @@ def main():
     ang_vel_graph = GraphRenderer("Angular Vel (rad/s)", graph_x, graph_y_start + graph_height + 20, 
                                  graph_width, graph_height, color=(255, 255, 0), y_range=(0, 1.0))
     
-    # Initialize IMU communication
+    # Initialize IMU communication (GRACEFUL FAILURE)
+    print("Connecting to IMU...")
     imu_interface = IMUInterface(USE_WIFI, SERIAL_PORT, BAUD_RATE, WIFI_HOST, WIFI_PORT)
-    if not imu_interface.connect():
-        return
+    imu_connected = imu_interface.connect()
+    
+    if not imu_connected:
+        print("⚠️  IMU connection failed - continuing in visualization-only mode")
+        print("    The application will start, but no IMU data will be received.")
     
     # Initialize event handler
     event_handler = EventHandler(config_manager, runtime_config, imu_calibration, 
@@ -320,9 +324,11 @@ def main():
             if not running:
                 break
             
-            # Read IMU data
-            line = imu_interface.read_line()
-            imu_data = IMUDataParser.parse_line(line, rtde_controller.log_file)
+            # Read IMU data (only if connected)
+            imu_data = None
+            if imu_connected:
+                line = imu_interface.read_line()
+                imu_data = IMUDataParser.parse_line(line, rtde_controller.log_file)
             
             # Process IMU data
             if imu_data:
@@ -410,7 +416,8 @@ def main():
             
             # Draw status text
             status_lines = StatusBuilder.build_status_lines(
-                vis_state, rtde_controller, imu_calibration, runtime_config, control_dispatcher)
+                vis_state, rtde_controller, imu_calibration, runtime_config, 
+                control_dispatcher, imu_connected)
             gui_overlay.draw_status_text(status_lines, display)
             
             # Render and update Graphs

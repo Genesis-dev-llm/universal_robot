@@ -1,6 +1,9 @@
 """
 Mathematical utilities for robot control
 Quaternion operations, coordinate transforms, filtering
+
+NOTE: All axis mapping is now handled by core/coordinate_frames.py
+This file contains only pure math utilities.
 """
 
 import numpy as np
@@ -34,73 +37,6 @@ def apply_deadzone_ramp(value, deadzone, ramp_width):
     else:
         # Outside ramp zone - full value
         return value
-
-#==============================================================================
-# DEPRECATED AXIS MAPPING FUNCTIONS
-# These are kept for backward compatibility only
-# New code should use core/coordinate_frames.py
-#==============================================================================
-
-def get_mapped_axis(euler_dict, axis_name, invert=False):
-    """
-    DEPRECATED: Use core.coordinate_frames.frame_transform instead
-    
-    Get the mapped IMU axis value based on configuration.
-    """
-    import warnings
-    warnings.warn(
-        "get_mapped_axis() is deprecated. Use core.coordinate_frames.frame_transform instead.",
-        DeprecationWarning,
-        stacklevel=2
-    )
-    value = euler_dict.get(axis_name, 0.0)
-    return -value if invert else value
-
-def apply_axis_mapping(roll, pitch, yaw, mapping):
-    """
-    DEPRECATED: Use core.coordinate_frames.frame_transform instead
-    
-    Apply IMU axis mapping configuration to remap and invert axes.
-    """
-    import warnings
-    warnings.warn(
-        "apply_axis_mapping() is deprecated. Use core.coordinate_frames.frame_transform instead.",
-        DeprecationWarning,
-        stacklevel=2
-    )
-    euler = {'roll': roll, 'pitch': pitch, 'yaw': yaw}
-    
-    return {
-        'x': get_mapped_axis(euler, mapping['x_axis'], mapping['x_invert']),
-        'y': get_mapped_axis(euler, mapping['y_axis'], mapping['y_invert']),
-        'z': get_mapped_axis(euler, mapping['z_axis'], mapping['z_invert']),
-        'rx': get_mapped_axis(euler, mapping['rx_axis'], mapping['rx_invert']),
-        'ry': get_mapped_axis(euler, mapping['ry_axis'], mapping['ry_invert']),
-        'rz': get_mapped_axis(euler, mapping['rz_axis'], mapping['rz_invert']),
-    }
-
-def apply_axis_mapping_quat(q, mapping):
-    """
-    DEPRECATED: Use core.coordinate_frames.frame_transform instead
-    
-    Apply IMU axis mapping (swaps and inversions) to a quaternion.
-    """
-    import warnings
-    warnings.warn(
-        "apply_axis_mapping_quat() is deprecated. Use core.coordinate_frames.frame_transform instead.",
-        DeprecationWarning,
-        stacklevel=2
-    )
-    # Convert to Euler, apply mapping, convert back
-    rx, ry, rz = quat_to_euler(q)
-    
-    euler = {'roll': math.degrees(rx), 'pitch': math.degrees(ry), 'yaw': math.degrees(rz)}
-    
-    m_rx = math.radians(get_mapped_axis(euler, mapping['rx_axis'], mapping['rx_invert']))
-    m_ry = math.radians(get_mapped_axis(euler, mapping['ry_axis'], mapping['ry_invert']))
-    m_rz = math.radians(get_mapped_axis(euler, mapping['rz_axis'], mapping['rz_invert']))
-    
-    return euler_to_quat(m_rx, m_ry, m_rz)
 
 #==============================================================================
 # QUATERNION OPERATIONS

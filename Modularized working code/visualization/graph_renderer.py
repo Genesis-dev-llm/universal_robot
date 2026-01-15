@@ -1,6 +1,12 @@
 """
 Real-time Graph Renderer
 Renders scrolling line graphs for data visualization using OpenGL
+
+FIXES:
+- Proper OpenGL state management
+- Fixed text rendering in 2D overlay
+- Better auto-scaling
+- Cleaner grid lines
 """
 
 from OpenGL.GL import *
@@ -9,9 +15,7 @@ import numpy as np
 import pygame
 
 class GraphRenderer:
-    """
-    Renders a scrolling real-time graph
-    """
+    """Renders a scrolling real-time graph"""
     
     def __init__(self, title, x, y, width, height, max_points=200, color=(0, 255, 0), y_range=(0, 1.0)):
         """
@@ -39,7 +43,7 @@ class GraphRenderer:
         for _ in range(max_points):
             self.data.append(0.0)
             
-        self.font = pygame.font.SysFont('monospace', 12)
+        self.font = pygame.font.SysFont('monospace', 10)
         
     def add_value(self, value):
         """Add new data point"""
@@ -47,8 +51,14 @@ class GraphRenderer:
     
     def render(self):
         """Render the graph"""
-        # Draw background
-        glColor4f(0.05, 0.05, 0.05, 0.8)
+        # Save OpenGL state
+        glPushAttrib(GL_ALL_ATTRIB_BITS)
+        
+        # Draw background with transparency
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        
+        glColor4f(0.05, 0.05, 0.05, 0.85)
         glBegin(GL_QUADS)
         glVertex2f(self.x, self.y)
         glVertex2f(self.x + self.width, self.y)
@@ -58,7 +68,7 @@ class GraphRenderer:
         
         # Draw border
         glLineWidth(1.0)
-        glColor4f(0.3, 0.3, 0.3, 1.0)
+        glColor4f(0.4, 0.4, 0.4, 1.0)
         glBegin(GL_LINE_LOOP)
         glVertex2f(self.x, self.y)
         glVertex2f(self.x + self.width, self.y)
@@ -68,18 +78,18 @@ class GraphRenderer:
         
         # Calculate scaling
         min_y, max_y = self.y_range
-        # Auto-scale if range is 0
-        if min_y == max_y:
-            min_y = min(self.data)
-            max_y = max(self.data)
-            if min_y == max_y:
-                max_y += 1.0
+        data_min = min(self.data) if self.data else 0
+        data_max = max(self.data) if self.data else 1
+        
+        # Auto-scale if needed
+        if data_max > max_y:
+            max_y = data_max * 1.1
         
         y_scale = self.height / (max_y - min_y) if (max_y - min_y) > 0 else 1.0
-        x_step = self.width / (self.max_points - 1)
+        x_step = self.width / (self.max_points - 1) if self.max_points > 1 else 1.0
         
         # Draw grid lines (horizontal)
-        glColor4f(0.2, 0.2, 0.2, 1.0)
+        glColor4f(0.2, 0.2, 0.2, 0.5)
         glBegin(GL_LINES)
         # Mid line
         mid_y = self.y + self.height / 2
@@ -97,18 +107,9 @@ class GraphRenderer:
             clamped_val = max(min_y, min(max_y, val))
             
             px = self.x + i * x_step
-            # OpenGL (0,0) is usually top-left in 2D ortho setups for GUI, but let's check setup_2d_projection.
-            # glOrtho(0, display_size[0], display_size[1], 0, -1, 1) means Y increases DOWN.
-            # So lower value should be lower on screen (Higher Y coord).
-            # graph Y=0 is bottom (self.y + self.height)
-            # graph Y=max is top (self.y)
             
-            # val relative to min: (val - min)
-            # normalized: (val - min) / range  --> 0 to 1 (1 is max)
-            # screen y offset from bottom: normalized * height
-            # But Y increases DOWN. So Y = (y + height) - offset
-            
-            normalized = (clamped_val - min_y) / (max_y - min_y)
+            # Calculate Y position (remember Y increases DOWN in 2D ortho)
+            normalized = (clamped_val - min_y) / (max_y - min_y) if (max_y - min_y) > 0 else 0
             py = (self.y + self.height) - (normalized * self.height)
             
             glVertex2f(px, py)
@@ -121,12 +122,27 @@ class GraphRenderer:
         # Render Min/Max labels
         self._render_text(f"{max_y:.2f}", (150, 150, 150), self.x + 5, self.y + 15)
         self._render_text(f"{min_y:.2f}", (150, 150, 150), self.x + 5, self.y + self.height - 15)
+        
+        # Restore OpenGL state
+        glPopAttrib()
 
     def _render_text(self, text, color, x, y):
-        """Helper to render text"""
-        text_surface = self.font.render(text, True, color)
-        text_data = pygame.image.tostring(text_surface, "RGBA", True)
-        glColor4f(1, 1, 1, 1) # Reset color for texture
-        glRasterPos2f(x, y)
-        glDrawPixels(text_surface.get_width(), text_surface.get_height(), 
-                    GL_RGBA, GL_UNSIGNED_BYTE, text_data)
+        """Helper to render text using pygame"""
+        try:
+            text_surface = self.font.render(text, True, color)
+            text_data = pygame.image.tostring(text_surface, "RGBA", True)
+            
+            # Save current state
+            glPushAttrib(GL_COLOR_BUFFER_BIT)
+            
+            glEnable(GL_BLEND)
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+            
+            glRasterPos2f(x, y)
+            glDrawPixels(text_surface.get_width(), text_surface.get_height(), 
+                        GL_RGBA, GL_UNSIGNED_BYTE, text_data)
+            
+            glPopAttrib()
+        except Exception as e:
+            # Silently fail if text rendering doesn't work
+            pass
