@@ -9,6 +9,10 @@ Standard IMU Frame (Right-Handed):
     +X = Forward (toward fingers when hand extended)
     +Y = Left (thumb direction when palm down)
     +Z = Up (back of hand direction)
+
+CHANGES:
+- Fixed translation_x inversion: Changed from -1 to +1
+- Forward tilt (positive roll) now produces forward movement (positive X)
 """
 
 import numpy as np
@@ -42,7 +46,7 @@ class CoordinateFrameTransform:
         # Robot Base Frame Mapping (UR Convention)
         # Maps Standard IMU axes to UR robot base frame
         self.robot_translation_map = {
-            'x': ('roll', -1),    # Tilt forward/back → Robot X (inverted)
+            'x': ('roll', 1),     # CHANGED: Was -1, now +1 (forward tilt = forward movement)
             'y': ('pitch', -1),   # Tilt left/right → Robot Y (inverted)
             'z': ('pitch', 1)     # Tilt forward/back → Robot Z (for vertical mode)
         }

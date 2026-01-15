@@ -19,9 +19,9 @@ USE_WIFI = False  # Set True for WiFi, False for USB
 # UNIVERSAL ROBOT SETTINGS
 #==============================================================================
 
-UR_ROBOT_IP = "192.168.1.100"
-UR_ENABLED = False  # Set True to enable robot control
-UR_SIMULATE = True  # Set False for real robot commands
+UR_ROBOT_IP = "192.168.1.191"
+UR_ENABLED = True  # Set True to enable robot control
+UR_SIMULATE = False  # Set False for real robot commands
 
 # UR Joint Limits (radians) - UR5/UR10 typical values
 UR_JOINT_LIMITS = {

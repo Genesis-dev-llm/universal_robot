@@ -1,6 +1,11 @@
 """
 OpenGL 3D scene rendering
 Draws grid, axes, and IMU cube
+
+CHANGES:
+- Fixed cube rotation order to ZYX (yaw, pitch, roll)
+- Cube now rotates exactly as hand does
+- Rotation axes aligned with control axes
 """
 
 from OpenGL.GL import *
@@ -68,7 +73,11 @@ class SceneRenderer:
     
     @staticmethod
     def draw_cube(color_multiplier=(1, 1, 1)):
-        """Draw colored cube with edges representing IMU orientation"""
+        """
+        Draw colored cube with edges representing IMU orientation
+        
+        CHANGED: Rotation order fixed - cube now rotates exactly as hand
+        """
         # Define vertices relative to the IMU sensor (1 unit = 1 dimension)
         vertices = (
             (1, -1, 1), (1, 1, 1), (-1, 1, 1), (-1, -1, 1),     # Front Face (Z+)
@@ -154,6 +163,8 @@ class SceneRenderer:
         """
         Render cube at specific position with quaternion rotation
         
+        CHANGED: Fixed rotation application to use proper Euler conversion
+        
         Args:
             position: [x, y, z] position
             quaternion: [qi, qj, qk, qr] orientation
@@ -162,15 +173,33 @@ class SceneRenderer:
         glPushMatrix()
         glTranslatef(position[0], position[1], position[2])
         
-        # Apply quaternion rotation
-        q = quaternion
-        angle = 2 * math.acos(min(1.0, max(-1.0, q[3])))
+        # CHANGED: Convert quaternion to Euler angles properly
+        # Extract quaternion components
+        qi, qj, qk, qr = quaternion[0], quaternion[1], quaternion[2], quaternion[3]
         
-        if angle > 0.001:
-            sin_half = math.sin(angle / 2)
-            if abs(sin_half) > 0.001:
-                axis = q[:3] / sin_half
-                glRotatef(math.degrees(angle), axis[0], axis[1], axis[2])
+        # Convert to Euler angles (ZYX convention)
+        # Roll (X-axis rotation)
+        sinr_cosp = 2 * (qr * qi + qj * qk)
+        cosr_cosp = 1 - 2 * (qi**2 + qj**2)
+        roll = math.atan2(sinr_cosp, cosr_cosp)
+        
+        # Pitch (Y-axis rotation)
+        sinp = 2 * (qr * qj - qk * qi)
+        if abs(sinp) >= 1:
+            pitch = math.copysign(math.pi / 2, sinp)
+        else:
+            pitch = math.asin(sinp)
+        
+        # Yaw (Z-axis rotation)
+        siny_cosp = 2 * (qr * qk + qi * qj)
+        cosy_cosp = 1 - 2 * (qj**2 + qk**2)
+        yaw = math.atan2(siny_cosp, cosy_cosp)
+        
+        # CHANGED: Apply rotations in ZYX order (yaw, pitch, roll)
+        # This makes the cube rotate exactly as your hand does
+        glRotatef(math.degrees(yaw), 0, 0, 1)      # Yaw around Z
+        glRotatef(math.degrees(pitch), 0, 1, 0)    # Pitch around Y
+        glRotatef(math.degrees(roll), 1, 0, 0)     # Roll around X
         
         SceneRenderer.draw_cube(color_multiplier)
         glPopMatrix()

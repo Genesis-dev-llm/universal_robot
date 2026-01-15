@@ -1,6 +1,11 @@
 """
 RTDE Robot Controller (Refactored)
 Main interface for Universal Robot control via RTDE
+
+CHANGES:
+- Added last_logged_mode tracking to reduce terminal spam
+- Only logs mode changes, not every command
+- Pass mode_name parameter to move_speed and move_servo
 """
 
 import time
@@ -64,6 +69,9 @@ class RTDEController:
         self.POSE_DELTA_THRESHOLD = 0.0005  # 0.5mm
         self.ORIENT_DELTA_THRESHOLD = 0.005 # ~0.3 degrees
         self.VEL_DELTA_THRESHOLD = 0.001    # 1mm/s or 0.001 rad/s
+        
+        # ADDED: Track last logged mode to reduce spam
+        self.last_logged_mode = None
         
         # IMU data smoothing
         self.smoothed_roll = 0.0
@@ -416,14 +424,17 @@ class RTDEController:
             'success_rate': (self.successful_commands / self.total_commands_sent * 100) if self.total_commands_sent > 0 else 0
         }
     
-    def move_speed(self, linear_velocity, angular_velocity, acceleration=0.5):
+    def move_speed(self, linear_velocity, angular_velocity, acceleration=0.5, mode_name=None):
         """
         Execute velocity control command (speedL)
+        
+        CHANGED: Added mode_name parameter to only log mode changes
         
         Args:
             linear_velocity: [vx, vy, vz] in m/s
             angular_velocity: [rx, ry, rz] in rad/s
             acceleration: Acceleration in m/s^2 (default 0.5)
+            mode_name: Name of current control mode (for logging)
         
         Returns:
             True if successful, False otherwise
@@ -451,8 +462,14 @@ class RTDEController:
         self.last_command_time = current_time
         self.total_commands_sent += 1
         
-        # Log command (sample every 10 to avoid spamming log)
-        if self.total_commands_sent % 10 == 0:
+        # CHANGED: Only log mode changes, not every command
+        if mode_name and mode_name != self.last_logged_mode:
+            print(f"Mode: {mode_name}")
+            self.last_logged_mode = mode_name
+            self.log_command(f"# Mode: {mode_name}")
+        
+        # Log to file occasionally (not terminal)
+        if self.total_commands_sent % 50 == 0:
             vel_str = "[" + ", ".join([f"{x:.4f}" for x in velocity_vector]) + "]"
             self.log_command(f"speedL({vel_str}, acc={acceleration:.2f})")
         
@@ -481,9 +498,11 @@ class RTDEController:
             self.failed_commands += 1
             return False
     
-    def move_servo(self, target_pose, velocity=0.5, acceleration=0.5, lookahead_time=0.1, gain=300):
+    def move_servo(self, target_pose, velocity=0.5, acceleration=0.5, lookahead_time=0.1, gain=300, mode_name=None):
         """
         Execute servo command (servoL) to a specific target pose
+        
+        CHANGED: Added mode_name parameter to only log mode changes
         
         Args:
             target_pose: Target pose [x, y, z, rx, ry, rz]
@@ -491,6 +510,7 @@ class RTDEController:
             acceleration: Acceleration limit (default 0.5)
             lookahead_time: Lookahead time (default 0.1)
             gain: Proportional gain (default 300)
+            mode_name: Name of current control mode (for logging)
         
         Returns:
             True if successful, False otherwise
@@ -531,8 +551,14 @@ class RTDEController:
         # Update target state
         self.target_tcp_pose = target_pose
         
-        # Log command (sample)
-        if self.total_commands_sent % 10 == 0:
+        # CHANGED: Only log mode changes, not every command
+        if mode_name and mode_name != self.last_logged_mode:
+            print(f"Mode: {mode_name}")
+            self.last_logged_mode = mode_name
+            self.log_command(f"# Mode: {mode_name}")
+        
+        # Log to file occasionally (not terminal)
+        if self.total_commands_sent % 50 == 0:
             pose_str = "[" + ", ".join([f"{x:.3f}" for x in target_pose]) + "]"
             self.log_command(f"servoL({pose_str}, t={lookahead_time}, g={gain})")
         

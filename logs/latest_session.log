@@ -1,4 +1,11 @@
-# RTDE Control Log - 2026-01-14 22:10:47.925023
-# Mode: SIMULATE
-# Robot IP: 192.168.1.100
+# RTDE Control Log - 2026-01-15 13:49:28.751963
+# Mode: REAL
+# Robot IP: 192.168.1.191
 
+[13:49:29.472] # Connected to robot at 192.168.1.191
+
+# Session Statistics:
+# Total commands: 0
+# Successful: 0
+# Failed: 0
+# Success rate: 0.0%

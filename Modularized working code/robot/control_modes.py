@@ -1,6 +1,10 @@
 """
 Control Mode Dispatcher
 Handles logic for different robot control modes
+
+CHANGES:
+- Added mode names to move_speed and move_servo calls
+- Only logs mode changes, not every command
 """
 
 import numpy as np
@@ -38,7 +42,7 @@ class ControlModeDispatcher:
         self.mimic_ref_hand_quat = None
         self.mimic_ref_robot_pose = None
         
-        # Input Hysteresis (Command Suppression) - FIXED: Moved into __init__
+        # Input Hysteresis (Command Suppression)
         self.last_input_angles = None
         self.INPUT_THRESHOLD = 3.0  # degrees
     
@@ -115,6 +119,9 @@ class ControlModeDispatcher:
         velocity_scale = self.rtde_controller.calculate_velocity_scale(
             filtered_roll, filtered_pitch, filtered_yaw)
         
+        # ADDED: Get mode name for logging
+        mode_name = self.get_mode_name(mode)
+        
         try:
             # Initialize accelerations (deltas from input)
             accel_pos = [0.0, 0.0, 0.0]
@@ -170,13 +177,14 @@ class ControlModeDispatcher:
                 # 5. Construct Target Pose (Keep Ref Position)
                 target_pose = self.mimic_ref_robot_pose[:3] + target_orientation
                 
-                # 6. Execute servoL
+                # 6. Execute servoL with mode name
                 self.rtde_controller.move_servo(
                     target_pose,
                     velocity=0.5 * runtime_config.ANGULAR_SPEED_SCALE,
                     acceleration=0.5,
                     lookahead_time=0.05,
-                    gain=500)
+                    gain=500,
+                    mode_name=mode_name)  # CHANGED: Added mode_name
                 return  # Exit early for Mode 6
             
             # Apply Momentum / Input Decay for Modes 1-5
@@ -199,7 +207,7 @@ class ControlModeDispatcher:
                 was_moving = self.rtde_controller.last_sent_velocity is not None and \
                             any(v != 0 for v in self.rtde_controller.last_sent_velocity)
                 if was_moving:
-                    self.rtde_controller.move_speed([0.0]*3, [0.0]*3, acceleration=1.0)
+                    self.rtde_controller.move_speed([0.0]*3, [0.0]*3, acceleration=1.0, mode_name=mode_name)
                 
                 self.current_velocity = np.array([0.0, 0.0, 0.0])
                 self.current_angular_velocity = np.array([0.0, 0.0, 0.0])
@@ -209,7 +217,8 @@ class ControlModeDispatcher:
             self.rtde_controller.move_speed(
                 self.current_velocity.tolist(),
                 self.current_angular_velocity.tolist(),
-                acceleration=0.5
+                acceleration=0.5,
+                mode_name=mode_name  # CHANGED: Added mode_name
             )
         
         except Exception as e:
