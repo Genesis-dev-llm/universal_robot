@@ -124,6 +124,7 @@ class RTDEController:
     def connect(self):
         """Connect to UR robot via RTDE"""
         try:
+            # Attempt connection with shorter timeout for responsiveness
             print(f"Connecting to UR robot at {self.robot_ip}...")
             self.rtde_c = rtde_control.RTDEControlInterface(self.robot_ip)
             self.rtde_r = rtde_receive.RTDEReceiveInterface(self.robot_ip)
@@ -144,8 +145,21 @@ class RTDEController:
             # Reset connection tracking
             self.connection_lost = False
             self.reconnect_attempts = 0
-            
             return True
+            
+        except RuntimeError as e: # rtde throws RuntimeError on timeout
+            print(f"\n[WARNING] Could not connect to robot at {self.robot_ip}")
+            print(f"Reason: {e}")
+            print(">> FALLING BACK TO SIMULATION MODE (Cube Visualization Only) <<\n")
+            
+            # Fallback Logic
+            self.simulate = True
+            self.enabled = False # Soft disable
+            self.rtde_c = None
+            self.rtde_r = None
+            
+            self.log_command(f"# Connection failed: {e}. Fallback to SIMULATION.")
+            return False
             
         except Exception as e:
             error_msg = RobotError.format_error('E102', str(e), f"IP: {self.robot_ip}")

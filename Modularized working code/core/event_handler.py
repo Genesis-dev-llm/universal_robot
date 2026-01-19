@@ -68,11 +68,24 @@ class EventHandler:
                 self.vis_state.reset()
         
         elif key == pygame.K_u:
-            # Toggle robot control
-            self.rtde_controller.enabled = not self.rtde_controller.enabled
-            status = "ENABLED" if self.rtde_controller.enabled else "DISABLED"
-            print(f"Robot control: {status}")
-            self.rtde_controller.log_command(f"# Robot control: {status}")
+            # Toggle robot control (Safety Interlock: Shift + U)
+            keys_pressed = pygame.key.get_mods()
+            if keys_pressed & pygame.KMOD_SHIFT:
+                if self.rtde_controller.connection_lost and not self.rtde_controller.enabled:
+                   print("Attempting to reconnect...")
+                   if self.rtde_controller.attempt_reconnect():
+                       self.rtde_controller.enabled = True
+                       print("Robot control: ENABLED")
+                       self.rtde_controller.log_command("# Robot control: ENABLED")
+                   else:
+                       print("Reconnection failed. Staying in Simulation Mode.")
+                else:
+                    self.rtde_controller.enabled = not self.rtde_controller.enabled
+                    status = "ENABLED" if self.rtde_controller.enabled else "DISABLED"
+                    print(f"Robot control: {status}")
+                    self.rtde_controller.log_command(f"# Robot control: {status}")
+            else:
+                print("[SAFETY] Robot control toggle requires SHIFT + U")
 
         elif key == pygame.K_s:
             # Emergency stop

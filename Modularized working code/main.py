@@ -347,6 +347,7 @@ def main():
                 # Mode transition handling
                 if imu_data['mode'] != vis_state.last_mode:
                     if vis_state.last_mode > 0 and imu_data['mode'] > 0:
+                        # Only stop if we have a real connection and aren't simulating
                         if rtde_controller.enabled and rtde_controller.rtde_c and not rtde_controller.simulate:
                             try:
                                 rtde_controller.rtde_c.stopL(2.0)
