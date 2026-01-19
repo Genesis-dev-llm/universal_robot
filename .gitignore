@@ -4,12 +4,13 @@ __pycache__/
 *$py.class
 *.so
 
-# Logs
+# Logs (Ignored)
 logs/
 *.log
 
-# Configuration (keep template, ignore actual config with secrets)
-robot_config.json
+# Configuration
+# Explicitly ALLOW robot_config.json as requested
+!robot_config.json
 *.local.json
 
 # Virtual Environment

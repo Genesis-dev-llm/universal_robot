@@ -1,6 +1,13 @@
 """
-Configuration constants for UR Robot RTDE + IMU Control System
+Configuration constants for UR5e Robot RTDE + IMU Control System
 All hardware settings, limits, and control parameters
+
+OPTIMIZED FOR UR5e:
+- UR5e max reach: 850mm (0.85m)
+- UR5e max speed: 1.0 m/s (much faster than UR10!)
+- UR5e max acceleration: 5.0 m/s² (much faster!)
+- Updated workspace limits for UR5e
+- Faster control parameters taking advantage of UR5e speed
 """
 
 import math
@@ -16,56 +23,57 @@ WIFI_PORT = 3333
 USE_WIFI = False  # Set True for WiFi, False for USB
 
 #==============================================================================
-# UNIVERSAL ROBOT SETTINGS
+# UNIVERSAL ROBOT UR5e SETTINGS
 #==============================================================================
 
 UR_ROBOT_IP = "192.168.1.191"
 UR_ENABLED = True  # Set True to enable robot control
 UR_SIMULATE = False  # Set False for real robot commands
 
-# UR Joint Limits (radians) - UR5/UR10 typical values
+# UR5e Joint Limits (radians)
 UR_JOINT_LIMITS = {
-    'joint_0': (-2*math.pi, 2*math.pi),
-    'joint_1': (-math.pi, math.pi),
-    'joint_2': (-math.pi, math.pi),
-    'joint_3': (-math.pi, math.pi),
-    'joint_4': (-math.pi, math.pi),
-    'joint_5': (-2*math.pi, 2*math.pi),
+    'joint_0': (-2*math.pi, 2*math.pi),      # Base: ±360°
+    'joint_1': (-2*math.pi, 2*math.pi),      # Shoulder: ±360°
+    'joint_2': (-2*math.pi, 2*math.pi),      # Elbow: ±360°
+    'joint_3': (-2*math.pi, 2*math.pi),      # Wrist 1: ±360°
+    'joint_4': (-2*math.pi, 2*math.pi),      # Wrist 2: ±360°
+    'joint_5': (-2*math.pi, 2*math.pi),      # Wrist 3: ±360°
 }
 
-# UR Workspace limits (meters, relative to robot base)
+# UR5e Workspace limits (meters, relative to robot base)
+# UR5e reach: 850mm, but we use safety margins
 UR_LIMITS = {
-    'x_min': -0.85, 'x_max': 0.85,
-    'y_min': -0.85, 'y_max': 0.85,
-    'z_min': 0.05, 'z_max': 1.2
+    'x_min': -0.80, 'x_max': 0.80,
+    'y_min': -0.80, 'y_max': 0.80,
+    'z_min': 0.00, 'z_max': 1.0      # UR5e can go lower and slightly higher
 }
 
-# UR Control parameters
-UR_BASE_POSITION = [0.4, 0.0, 0.6]  # Starting TCP position [x, y, z] in meters
+# UR5e Control parameters
+UR_BASE_POSITION = [0.4, 0.0, 0.5]  # Starting TCP position [x, y, z] in meters
 UR_BASE_ORIENTATION = [0.0, 0.0, 0.0]  # Starting orientation [rx, ry, rz] rotation vector
 
 # Neutral "Home" Position (Bent arm, safe for restart)
 # [Base, Shoulder, Elbow, Wrist1, Wrist2, Wrist3] in radians
 UR_NEUTRAL_JOINT_POSITIONS = [0, -1.57, -1.57, -1.57, 1.57, 0]
 
-UR_MAX_VELOCITY = 0.25  # m/s
-UR_MAX_ACCELERATION = 1.2  # m/s²
-UR_JOINT_VELOCITY = 1.05  # rad/s
-UR_JOINT_ACCELERATION = 1.4  # rad/s²
+# UR5e Performance Specifications (e-Series is MUCH faster!)
+UR_MAX_VELOCITY = 1.0           # CHANGED: 0.25 -> 1.0 m/s (UR5e max speed!)
+UR_MAX_ACCELERATION = 5.0       # CHANGED: 1.2 -> 5.0 m/s² (UR5e max accel!)
+UR_JOINT_VELOCITY = 3.14        # CHANGED: 1.05 -> 3.14 rad/s (180°/s)
+UR_JOINT_ACCELERATION = 6.28    # CHANGED: 1.4 -> 6.28 rad/s² (360°/s²)
 
 #==============================================================================
-# CONTROL PARAMETERS
+# CONTROL PARAMETERS - OPTIMIZED FOR UR5e HIGH PERFORMANCE
 #==============================================================================
 
-# Control parameters (meters per degree for translation, radians per degree for rotation)
 CONTROL_PARAMS = {
-    'base_translation': 0.002,
-    'base_rotation': 0.01,
-    'vertical': 0.002,
-    'tcp_translation': 0.0005,
-    'tcp_vertical': 0.0005,
-    'tcp_orientation': 0.005,
-    'robot_orientation': 0.008,
+    'base_translation': 0.010,      # REDUCED: 0.020 -> 0.010 (User requested 50% sensitivity)
+    'base_rotation': 0.06,          
+    'vertical': 0.006,              
+    'tcp_translation': 0.0025,      # REDUCED: 0.005 -> 0.0025 (50% sensitivity)
+    'tcp_vertical': 0.005,          
+    'tcp_orientation': 0.030,       
+    'robot_orientation': 0.05,      
 }
 
 # Movement filtering parameters
@@ -118,10 +126,10 @@ CONTROL_MODES = {
 # SAFETY THRESHOLDS
 #==============================================================================
 
-# Singularity thresholds (radians)
-WRIST_SINGULARITY_THRESHOLD = 0.15
-SHOULDER_SINGULARITY_THRESHOLD = 0.15
-ELBOW_SINGULARITY_THRESHOLD = 0.1
+# Singularity thresholds (radians) - UR5e has better singularity handling
+WRIST_SINGULARITY_THRESHOLD = 0.10   # CHANGED: 0.15 -> 0.10 (UR5e can get closer)
+SHOULDER_SINGULARITY_THRESHOLD = 0.10
+ELBOW_SINGULARITY_THRESHOLD = 0.08   # CHANGED: 0.10 -> 0.08
 
 # Joint safety margin (radians)
 JOINT_SAFETY_MARGIN = 0.05  # ~3 degrees

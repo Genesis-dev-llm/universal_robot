@@ -1,11 +1,8 @@
 """
-RTDE Robot Controller (Refactored)
-Main interface for Universal Robot control via RTDE
-
+RTDE Robot Controller - Linear Smoothing Update
 CHANGES:
-- Added last_logged_mode tracking to reduce terminal spam
-- Only logs mode changes, not every command
-- Pass mode_name parameter to move_speed and move_servo
+- Changed from exponential to linear smoothing
+- Smoothing now averages last N samples instead of exponential decay
 """
 
 import time
@@ -70,14 +67,14 @@ class RTDEController:
         self.ORIENT_DELTA_THRESHOLD = 0.005 # ~0.3 degrees
         self.VEL_DELTA_THRESHOLD = 0.001    # 1mm/s or 0.001 rad/s
         
-        # ADDED: Track last logged mode to reduce spam
+        # Track last logged mode to reduce spam
         self.last_logged_mode = None
         
-        # IMU data smoothing
-        self.smoothed_roll = 0.0
-        self.smoothed_pitch = 0.0
-        self.smoothed_yaw = 0.0
-        self.smoothing_factor = config_mgr.get('safety', 'smoothing_factor', 0.3) if config_mgr else 0.3
+        # CHANGED: Linear smoothing using rolling average
+        self.smoothing_window_size = config_mgr.get('safety', 'smoothing_window_size', 5) if config_mgr else 5
+        self.roll_history = deque(maxlen=self.smoothing_window_size)
+        self.pitch_history = deque(maxlen=self.smoothing_window_size)
+        self.yaw_history = deque(maxlen=self.smoothing_window_size)
         
         # Velocity ramping
         self.current_velocity_scale = 0.0
@@ -236,11 +233,21 @@ class RTDEController:
             self.connection_lost = True
     
     def apply_smoothing(self, roll, pitch, yaw):
-        """Apply exponential smoothing to IMU data"""
-        self.smoothed_roll = (1 - self.smoothing_factor) * self.smoothed_roll + self.smoothing_factor * roll
-        self.smoothed_pitch = (1 - self.smoothing_factor) * self.smoothed_pitch + self.smoothing_factor * pitch
-        self.smoothed_yaw = (1 - self.smoothing_factor) * self.smoothed_yaw + self.smoothing_factor * yaw
-        return self.smoothed_roll, self.smoothed_pitch, self.smoothed_yaw
+        """
+        CHANGED: Apply LINEAR smoothing using rolling average
+        Instead of exponential decay, we now average the last N samples
+        """
+        # Add new samples to history
+        self.roll_history.append(roll)
+        self.pitch_history.append(pitch)
+        self.yaw_history.append(yaw)
+        
+        # Calculate simple average of all samples in window
+        smoothed_roll = sum(self.roll_history) / len(self.roll_history)
+        smoothed_pitch = sum(self.pitch_history) / len(self.pitch_history)
+        smoothed_yaw = sum(self.yaw_history) / len(self.yaw_history)
+        
+        return smoothed_roll, smoothed_pitch, smoothed_yaw
     
     def calculate_velocity_scale(self, roll, pitch, yaw):
         """Scale velocity based on IMU movement speed"""
@@ -428,8 +435,6 @@ class RTDEController:
         """
         Execute velocity control command (speedL)
         
-        CHANGED: Added mode_name parameter to only log mode changes
-        
         Args:
             linear_velocity: [vx, vy, vz] in m/s
             angular_velocity: [rx, ry, rz] in rad/s
@@ -462,7 +467,7 @@ class RTDEController:
         self.last_command_time = current_time
         self.total_commands_sent += 1
         
-        # CHANGED: Only log mode changes, not every command
+        # Only log mode changes, not every command
         if mode_name and mode_name != self.last_logged_mode:
             print(f"Mode: {mode_name}")
             self.last_logged_mode = mode_name
@@ -484,6 +489,11 @@ class RTDEController:
         try:
             success = self.rtde_c.speedL(velocity_vector, acceleration, 0.008)
             
+            # DEBUG: Print velocity magnitude to prove scaling works
+            vel_mag = math.sqrt(sum(v**2 for v in velocity_vector[:3]))
+            if self.total_commands_sent % 20 == 0:
+                print(f"CMD Vel Mag: {vel_mag:.4f} m/s (Scale applied?)")
+            
             if success:
                 self.successful_commands += 1
             else:
@@ -501,8 +511,6 @@ class RTDEController:
     def move_servo(self, target_pose, velocity=0.5, acceleration=0.5, lookahead_time=0.1, gain=300, mode_name=None):
         """
         Execute servo command (servoL) to a specific target pose
-        
-        CHANGED: Added mode_name parameter to only log mode changes
         
         Args:
             target_pose: Target pose [x, y, z, rx, ry, rz]
@@ -551,7 +559,7 @@ class RTDEController:
         # Update target state
         self.target_tcp_pose = target_pose
         
-        # CHANGED: Only log mode changes, not every command
+        # Only log mode changes, not every command
         if mode_name and mode_name != self.last_logged_mode:
             print(f"Mode: {mode_name}")
             self.last_logged_mode = mode_name

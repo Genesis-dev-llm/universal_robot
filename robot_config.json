@@ -4,19 +4,20 @@
     },
     "safety": {
         "smoothing_factor": 0.3,
-        "velocity_ramp_rate": 0.1,
+        "velocity_ramp_rate": 0.15,
         "deadzone": 3.0,
         "deadzone_ramp_width": 2.0,
-        "max_velocity_scale": 1.0
+        "max_velocity_scale": 1.0,
+        "smoothing_window_size": 3
     },
     "control": {
-        "base_translation": 0.002,
-        "base_rotation": 0.01,
-        "vertical": 0.002,
-        "tcp_translation": 0.0005,
-        "tcp_vertical": 0.0005,
-        "tcp_orientation": 0.005,
-        "robot_orientation": 0.008
+        "base_translation": 0.02,
+        "base_rotation": 0.06,
+        "vertical": 0.006,
+        "tcp_translation": 0.005,
+        "tcp_vertical": 0.005,
+        "tcp_orientation": 0.03,
+        "robot_orientation": 0.05
     },
     "imu_calibration": {
         "roll_offset": -4.7757,
@@ -30,8 +31,8 @@
         "camera_distance": 20.0
     },
     "speed_scaling": {
-        "linear_scale": 0.9999999999999992,
-        "angular_scale": 0.9999999999999999,
+        "linear_scale": 1.0,
+        "angular_scale": 1.0,
         "min_scale": 0.1,
         "max_scale": 2.0,
         "step": 0.1
