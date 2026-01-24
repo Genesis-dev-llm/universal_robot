@@ -1,14 +1,13 @@
 """
 Universal Robot RTDE Control with Wearable IMU
-Main Application Entry Point - Bug-Free Version
+Main Application Entry Point - Redesigned Mode System
 
-Fixes:
-- Graceful IMU connection failure
-- Optional RTDE connection
-- Proper error handling
-- Clean startup without dependencies
+CHANGES:
+- Fixed cube rotation for linear modes (stays upright)
+- Cube only rotates in orientation modes (4, 5, 6)
+- Terminal spam eliminated (mode changes only)
 
-Author: Bug-Free Refactored Version
+Author: Professional Refactored Version
 Date: January 2025
 """
 
@@ -51,27 +50,50 @@ from visualization.graph_renderer import GraphRenderer
 #==============================================================================
 
 class VisualizationState:
-    """Manages 3D visualization state (cube position, velocity, etc.)"""
+    """
+    Manages 3D visualization state (cube position, velocity, rotation)
+    
+    REDESIGNED: Cube rotation now mode-dependent
+    - Linear modes (1, 2, 3): Cube stays upright, position updates only
+    - Orientation modes (4, 5, 6): Cube rotates to match hand orientation
+    """
     
     def __init__(self):
         self.position = np.array([0.0, -1.0, 0.0])
-        self.rotation_quat = np.array([0.0, 0.0, 0.0, 1.0])
+        self.rotation_quat = np.array([0.0, 0.0, 0.0, 1.0])  # Identity (upright)
         self.velocity = np.array([0.0, 0.0, 0.0])
         self.is_active = False
         self.current_mode = 0
         self.last_mode = -1
         self.visualizer_mode = 'CUBE'  # 'CUBE' or 'ROBOT'
+        
+        # NEW: Control whether cube should rotate based on mode
+        self.should_show_rotation = False
     
     def update_from_imu(self, imu_data, runtime_config):
         """Update visualization based on IMU data"""
         self.is_active = True
         self.current_mode = imu_data['mode']
         
-        # Update rotation from quaternion using coordinate transform
-        raw_quat = quaternion_normalize(imu_data['quaternion'])
-        self.rotation_quat = frame_transform.apply_quaternion_mapping(raw_quat)
+        # Determine if this mode should show rotation
+        # Modes 1, 2, 3: Linear only (no rotation)
+        # Modes 4, 5, 6: Orientation modes (show rotation)
+        if self.current_mode in [1, 2, 3]:
+            self.should_show_rotation = False
+        elif self.current_mode in [4, 5, 6]:
+            self.should_show_rotation = True
+        else:  # Mode 0 (IDLE)
+            self.should_show_rotation = False
         
-        # Extract Euler angles
+        # Update rotation quaternion (only if rotation mode)
+        if self.should_show_rotation:
+            raw_quat = quaternion_normalize(imu_data['quaternion'])
+            self.rotation_quat = frame_transform.apply_quaternion_mapping(raw_quat)
+        else:
+            # Keep cube upright (identity quaternion)
+            self.rotation_quat = np.array([0.0, 0.0, 0.0, 1.0])
+        
+        # Extract Euler angles for position updates
         rel_roll, rel_pitch, rel_yaw = imu_data['euler']
         
         # Apply deadzone to all axes
@@ -89,23 +111,21 @@ class VisualizationState:
         # Get visualization-frame deltas using coordinate transform
         viz_trans = frame_transform.to_robot_translation(imu_euler)
         
-        # Reset velocity for rotational modes
-        if self.current_mode in [3, 6]:
-            if self.last_mode not in [3, 6]:
+        # Reset velocity for pure rotation modes (4, 5, 6)
+        if self.current_mode in [4, 5, 6]:
+            if self.last_mode not in [4, 5, 6]:
                 self.velocity = np.array([0.0, 0.0, 0.0])
             self.velocity *= (VELOCITY_DECAY - 0.15)
         
-        # Update velocity based on mode
-        if self.current_mode == 1:  # BASE_FRAME_XY
+        # Update velocity based on mode (position changes for linear modes only)
+        if self.current_mode == 1:  # CRANE MODE
             self.velocity[0] += viz_trans['x'] * 0.001 * runtime_config.LINEAR_SPEED_SCALE
-            self.velocity[2] += viz_trans['y'] * 0.001 * runtime_config.LINEAR_SPEED_SCALE
+            # Note: Base rotation doesn't affect cube position in visualization
         elif self.current_mode == 2:  # VERTICAL_Z
             self.velocity[1] += viz_trans['z'] * 0.001 * runtime_config.LINEAR_SPEED_SCALE
-        elif self.current_mode == 4:  # TCP_XY
-            self.velocity[0] += viz_trans['x'] * 0.0005 * runtime_config.LINEAR_SPEED_SCALE
-            self.velocity[2] += viz_trans['y'] * 0.0005 * runtime_config.LINEAR_SPEED_SCALE
-        elif self.current_mode == 5:  # TCP_Z
-            self.velocity[1] += viz_trans['z'] * 0.0005 * runtime_config.LINEAR_SPEED_SCALE
+        elif self.current_mode == 3:  # LATERAL_PRECISE
+            self.velocity[2] += viz_trans['y'] * 0.001 * runtime_config.LINEAR_SPEED_SCALE
+        # Modes 4, 5, 6: Position locked, only rotation updates (already handled above)
     
     def update_physics(self):
         """Update physics simulation"""
@@ -120,28 +140,27 @@ class VisualizationState:
         self.is_active = False
         self.current_mode = 0
         self.last_mode = -1
+        self.should_show_rotation = False
     
     def get_color_multiplier(self, runtime_config, rtde_enabled):
         """Get color multiplier based on mode and state"""
         if not self.is_active or self.current_mode == 0:
             return (0.5, 0.5, 0.5)  # Gray for idle
         
+        # Updated mode colors for new system
         mode_colors = {
-            1: (1.0, 0.3, 0.3),  # Red - BASE_FRAME_XY
+            1: (1.0, 0.3, 0.3),  # Red - CRANE MODE
             2: (0.3, 1.0, 0.3),  # Green - VERTICAL_Z
-            3: (1.0, 1.0, 0.3),  # Yellow - BASE_FRAME_ORIENT
-            4: (0.3, 0.3, 1.0),  # Blue - TCP_XY
-            5: (1.0, 0.3, 1.0),  # Magenta - TCP_Z
-            6: (0.3, 1.0, 1.0)   # Cyan - TCP_ORIENT
+            3: (0.3, 0.3, 1.0),  # Blue - LATERAL_PRECISE
+            4: (1.0, 1.0, 0.3),  # Yellow - WRIST_ORIENT
+            5: (1.0, 0.3, 1.0),  # Magenta - WRIST_SCREW
+            6: (0.3, 1.0, 1.0)   # Cyan - TCP_ORIENT_MIMIC
         }
         
         base_color = mode_colors.get(self.current_mode, (1.0, 1.0, 1.0))
         
         if rtde_enabled:
-            if self.current_mode in [1, 3] and not runtime_config.ENABLE_REMAPPED_MODES:
-                return tuple(c * 0.3 for c in base_color)  # Dim if disabled
-            else:
-                return base_color
+            return base_color
         else:
             return tuple(c * 0.6 for c in base_color)  # Dim if robot disabled
 
@@ -213,14 +232,11 @@ def print_startup_info(config_manager, imu_calibration, imu_interface, runtime_c
     print(f"Robot Control: {'ENABLED' if UR_ENABLED else 'DISABLED'}")
     print(f"Simulation Mode: {'ON' if UR_SIMULATE else 'OFF (REAL ROBOT)'}")
     print(f"Remapped Modes: {'ENABLED' if runtime_config.ENABLE_REMAPPED_MODES else 'DISABLED (SAFETY)'}")
-    print("\nControl Modes:")
+    print("\nControl Modes (Redesigned):")
     for mode_num, mode_name in CONTROL_MODES.items():
         if mode_num == 0:
             continue
-        status = ""
-        if mode_num in [1, 3] and not runtime_config.ENABLE_REMAPPED_MODES:
-            status = " [DISABLED - Press M to enable]"
-        print(f"  Mode {mode_num}: {mode_name}{status}")
+        print(f"  Mode {mode_num}: {mode_name}")
     print("\nControls:")
     print("  [TAB] Switch View | [R] Reset | [U] Robot Power | [S] Emergency Stop")
     print("  [↑↓] Linear Speed | [←→] Angular Speed | [C] Save Config")
@@ -355,11 +371,7 @@ def main():
                             except:
                                 pass
                     
-                    if imu_data['mode'] != 0:
-                        mode_name = control_dispatcher.get_mode_name(imu_data['mode'])
-                        print(f"Mode: {mode_name}")
-                        rtde_controller.log_command(f"# Mode: {mode_name}")
-                    
+                    # Mode change message handled in control_dispatcher now
                     vis_state.last_mode = imu_data['mode']
                 
                 # Execute robot control

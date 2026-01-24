@@ -39,6 +39,73 @@ def apply_deadzone_ramp(value, deadzone, ramp_width):
         return value
 
 #==============================================================================
+# COORDINATE FRAME TRANSFORMATIONS
+#==============================================================================
+
+def rotation_vector_to_matrix(rotation_vector):
+    """
+    Convert UR rotation vector (axis-angle) to 3x3 rotation matrix
+    
+    Args:
+        rotation_vector: [rx, ry, rz] in radians (axis-angle representation)
+    
+    Returns:
+        3x3 numpy rotation matrix
+    """
+    rx, ry, rz = rotation_vector[0], rotation_vector[1], rotation_vector[2]
+    
+    # Calculate angle (magnitude of rotation vector)
+    angle = math.sqrt(rx**2 + ry**2 + rz**2)
+    
+    # Handle zero rotation case
+    if angle < 1e-6:
+        return np.eye(3)
+    
+    # Normalize to get axis
+    axis = np.array([rx, ry, rz]) / angle
+    kx, ky, kz = axis[0], axis[1], axis[2]
+    
+    # Rodrigues' rotation formula
+    c = math.cos(angle)
+    s = math.sin(angle)
+    t = 1 - c
+    
+    rotation_matrix = np.array([
+        [t*kx*kx + c,    t*kx*ky - s*kz, t*kx*kz + s*ky],
+        [t*kx*ky + s*kz, t*ky*ky + c,    t*ky*kz - s*kx],
+        [t*kx*kz - s*ky, t*ky*kz + s*kx, t*kz*kz + c   ]
+    ])
+    
+    return rotation_matrix
+
+def transform_tcp_velocity_to_base(tcp_velocity, tcp_orientation):
+    """
+    Transform velocity from TCP frame to Base frame
+    
+    This enables intuitive control where movements are relative to the tool's
+    current orientation rather than the robot's base.
+    
+    Args:
+        tcp_velocity: Desired velocity in TCP frame [vx, vy, vz] in m/s
+        tcp_orientation: Current TCP orientation [rx, ry, rz] rotation vector
+    
+    Returns:
+        Velocity in Base frame [vx_base, vy_base, vz_base]
+    
+    Example:
+        TCP pointing 45° right, command "move forward in TCP frame"
+        Result: Base frame velocity at 45° angle
+    """
+    # Convert TCP orientation to rotation matrix
+    rotation_matrix = rotation_vector_to_matrix(tcp_orientation)
+    
+    # Transform velocity vector
+    tcp_vel_vector = np.array(tcp_velocity)
+    base_vel_vector = rotation_matrix.dot(tcp_vel_vector)
+    
+    return base_vel_vector.tolist()
+
+#==============================================================================
 # QUATERNION OPERATIONS
 #==============================================================================
 

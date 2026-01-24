@@ -2,7 +2,7 @@
 RTDE Robot Controller - Linear Smoothing Update
 CHANGES:
 - Changed from exponential to linear smoothing
-- Smoothing now averages last N samples instead of exponential decay
+- Added speedJ support for direct joint control (Modes 4 & 5)
 """
 
 import time
@@ -16,6 +16,7 @@ from robot.safety_checker import SafetyChecker
 from config.constants import (
     UR_BASE_POSITION, UR_BASE_ORIENTATION,
     UR_MAX_VELOCITY, UR_MAX_ACCELERATION,
+    UR_JOINT_VELOCITY, UR_JOINT_ACCELERATION,
     RTDE_MAX_FREQUENCY
 )
 
@@ -63,9 +64,11 @@ class RTDEController:
         # Command Thresholding (to prevent jittery updates)
         self.last_sent_pose = None
         self.last_sent_velocity = None
+        self.last_sent_joint_velocity = None  # NEW: For speedJ commands
         self.POSE_DELTA_THRESHOLD = 0.0005  # 0.5mm
         self.ORIENT_DELTA_THRESHOLD = 0.005 # ~0.3 degrees
         self.VEL_DELTA_THRESHOLD = 0.001    # 1mm/s or 0.001 rad/s
+        self.JOINT_VEL_DELTA_THRESHOLD = 0.001  # 0.001 rad/s for joints
         
         # Track last logged mode to reduce spam
         self.last_logged_mode = None
@@ -481,11 +484,7 @@ class RTDEController:
         self.last_command_time = current_time
         self.total_commands_sent += 1
         
-        # Only log mode changes, not every command
-        if mode_name and mode_name != self.last_logged_mode:
-            print(f"Mode: {mode_name}")
-            self.last_logged_mode = mode_name
-            self.log_command(f"# Mode: {mode_name}")
+        # Only log mode changes, not every command (handled in dispatcher now)
         
         # Log to file occasionally (not terminal)
         if self.total_commands_sent % 50 == 0:
@@ -503,11 +502,6 @@ class RTDEController:
         try:
             success = self.rtde_c.speedL(velocity_vector, acceleration, 0.008)
             
-            # DEBUG: Print velocity magnitude to prove scaling works
-            vel_mag = math.sqrt(sum(v**2 for v in velocity_vector[:3]))
-            if self.total_commands_sent % 20 == 0:
-                print(f"CMD Vel Mag: {vel_mag:.4f} m/s (Scale applied?)")
-            
             if success:
                 self.successful_commands += 1
             else:
@@ -518,6 +512,72 @@ class RTDEController:
         except Exception as e:
             self.log_command(f"# ERROR: {e}")
             print(f"RTDE speedL error: {e}")
+            self.connection_lost = True
+            self.failed_commands += 1
+            return False
+    
+    def move_speed_joint(self, joint_velocities, acceleration=1.0, mode_name=None):
+        """
+        Execute joint velocity control command (speedJ)
+        
+        Used for precise wrist control in Modes 4 & 5 where we want to move
+        ONLY specific joints without IK solver assistance.
+        
+        Args:
+            joint_velocities: [q0, q1, q2, q3, q4, q5] in rad/s
+            acceleration: Joint acceleration in rad/s^2 (default 1.0)
+            mode_name: Name of current control mode (for logging)
+        
+        Returns:
+            True if successful, False otherwise
+        """
+        current_time = time.time()
+        
+        # Rate limiting (125Hz max for RTDE)
+        if current_time - self.last_command_time < RTDE_MAX_FREQUENCY:
+            return False
+        
+        # Threshold Check (Suppression)
+        is_zero = all(v == 0 for v in joint_velocities)
+        was_moving = self.last_sent_joint_velocity is not None and any(v != 0 for v in self.last_sent_joint_velocity)
+        
+        if self.last_sent_joint_velocity is not None and not (is_zero and was_moving):
+            max_delta = max(abs(v1 - v2) for v1, v2 in zip(joint_velocities, self.last_sent_joint_velocity))
+            if max_delta < self.JOINT_VEL_DELTA_THRESHOLD:
+                return True
+        
+        # Update state and timing
+        self.last_sent_joint_velocity = joint_velocities[:]
+        self.last_command_time = current_time
+        self.total_commands_sent += 1
+        
+        # Log to file occasionally (not terminal)
+        if self.total_commands_sent % 50 == 0:
+            vel_str = "[" + ", ".join([f"{x:.4f}" for x in joint_velocities]) + "]"
+            self.log_command(f"speedJ({vel_str}, acc={acceleration:.2f})")
+        
+        if self.simulate:
+            self.successful_commands += 1
+            return True
+        
+        if not self.enabled or not self.rtde_c:
+            self.failed_commands += 1
+            return False
+        
+        try:
+            # speedJ parameters: joint_speeds, acceleration, time (async time)
+            success = self.rtde_c.speedJ(joint_velocities, acceleration, 0.008)
+            
+            if success:
+                self.successful_commands += 1
+            else:
+                self.failed_commands += 1
+            
+            return success
+            
+        except Exception as e:
+            self.log_command(f"# ERROR: {e}")
+            print(f"RTDE speedJ error: {e}")
             self.connection_lost = True
             self.failed_commands += 1
             return False
@@ -572,12 +632,6 @@ class RTDEController:
         
         # Update target state
         self.target_tcp_pose = target_pose
-        
-        # Only log mode changes, not every command
-        if mode_name and mode_name != self.last_logged_mode:
-            print(f"Mode: {mode_name}")
-            self.last_logged_mode = mode_name
-            self.log_command(f"# Mode: {mode_name}")
         
         # Log to file occasionally (not terminal)
         if self.total_commands_sent % 50 == 0:

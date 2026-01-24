@@ -1,12 +1,14 @@
 """
-Control Mode Dispatcher
+Control Mode Dispatcher - CORRECTED
 Handles logic for different robot control modes
 
 FIXES:
-- Removed momentum/velocity accumulation causing lag
+- Modes 4 & 5 now use speedJ (direct joint control)
+- Fixed axis mappings for wrist control
+- Removed momentum/velocity accumulation
 - Direct pass-through of scaled input values
-- No artificial decay or smoothing in dispatcher
-- Fixes thread issues by using direct speedL commands
+- Added TCP-to-Base frame transformation for intuitive control
+- Fixed terminal spam (only logs mode changes)
 """
 
 import numpy as np
@@ -16,13 +18,15 @@ from core.math_utils import (
     apply_deadzone_ramp,
     quaternion_difference,
     quaternion_to_rotation_vector,
-    rotation_vector_add
+    rotation_vector_add,
+    transform_tcp_velocity_to_base
 )
 from core.coordinate_frames import frame_transform
 
 class ControlModeDispatcher:
     """
     Dispatches control commands based on active mode
+    Handles frame transformations and RTDE command generation
     """
     
     def __init__(self, rtde_controller):
@@ -38,14 +42,11 @@ class ControlModeDispatcher:
         # Track state for display only (not for control)
         self.current_velocity = np.array([0.0, 0.0, 0.0])
         self.current_angular_velocity = np.array([0.0, 0.0, 0.0])
-        self.last_mode = 0
+        self.last_mode = -1  # Changed to -1 to ensure first mode prints
         
-        # Mimic mode state
+        # Mimic mode state (Mode 6)
         self.mimic_ref_hand_quat = None
         self.mimic_ref_robot_pose = None
-        
-        # REMOVED: Input hysteresis (was causing lag)
-        # Instead we rely on RTDE's built-in command suppression
     
     def reset_mimic_references(self):
         """Force reset of mimic mode references (call after calibration)"""
@@ -66,14 +67,22 @@ class ControlModeDispatcher:
             imu_data: Dictionary with parsed IMU data
             runtime_config: RuntimeConfig instance
         """
-        # Reset mimic state on mode switch
+        # CRITICAL: Mode change detection at TOP to prevent spam
         if mode != self.last_mode:
+            # Only print/log on actual mode change
+            mode_name = self.get_mode_name(mode)
+            if mode != 0:  # Don't spam IDLE messages
+                print(f"Mode: {mode_name}")
+            self.rtde_controller.log_command(f"# Mode: {mode_name}")
+            
+            # Reset mimic state on mode switch
             self.mimic_ref_hand_quat = None
             self.mimic_ref_robot_pose = None
+            
             self.last_mode = mode
         
+        # Handle IDLE mode
         if mode == 0:
-            # IDLE - send stop command
             self.rtde_controller.move_speed([0.0]*3, [0.0]*3, acceleration=1.0, mode_name="IDLE")
             self.current_velocity = np.array([0.0, 0.0, 0.0])
             self.current_angular_velocity = np.array([0.0, 0.0, 0.0])
@@ -82,7 +91,7 @@ class ControlModeDispatcher:
         # Extract Euler angles (already calibrated)
         rel_roll, rel_pitch, rel_yaw = imu_data['euler']
         
-        # Apply smoothing via controller (now linear averaging)
+        # Apply smoothing via controller
         smooth_roll, smooth_pitch, smooth_yaw = self.rtde_controller.apply_smoothing(
             rel_roll, rel_pitch, rel_yaw)
         
@@ -102,79 +111,191 @@ class ControlModeDispatcher:
         robot_trans = frame_transform.to_robot_translation(imu_euler)
         robot_rot = frame_transform.to_robot_rotation(imu_euler)
         
-        # Calculate velocity scale (use filtered values)
-        velocity_scale = self.rtde_controller.calculate_velocity_scale(
-            filtered_roll, filtered_pitch, filtered_yaw)
+        # Get current TCP orientation for frame transformations (Modes 1 & 3)
+        current_tcp_orientation = [0.0, 0.0, 0.0]
+        if mode in [1, 3] and self.rtde_controller.rtde_r:
+            try:
+                current_pose = self.rtde_controller.rtde_r.getActualTCPPose()
+                if current_pose:
+                    current_tcp_orientation = current_pose[3:6]
+            except:
+                pass  # Use zero orientation if read fails
         
-        # Get mode name for logging
+        # Get mode name for logging (file only, not terminal)
         mode_name = self.get_mode_name(mode)
         
         try:
-            # CHANGED: Direct velocity calculation (no momentum accumulation)
+            # Initialize velocity vectors
             velocity_pos = [0.0, 0.0, 0.0]
             velocity_rot = [0.0, 0.0, 0.0]
             
+            # ================================================================
+            # MODE 1: CRANE MODE
+            # ================================================================
             if mode == 1:
-                # BASE_FRAME_XY
-                velocity_pos, velocity_rot = self.movement_modes.calculate_base_frame_xy(
-                    robot_trans['x'], robot_trans['y'], runtime_config.LINEAR_SPEED_SCALE)
+                # Get TCP-frame linear velocity and base-frame angular velocity
+                tcp_linear_vel, base_angular_vel = self.movement_modes.calculate_crane_mode(
+                    robot_trans['x'],  # Forward/back
+                    robot_trans['y'],  # Left/right (becomes base rotation)
+                    runtime_config.LINEAR_SPEED_SCALE,
+                    runtime_config.ANGULAR_SPEED_SCALE
+                )
+                
+                # Transform TCP-frame linear velocity to base frame
+                base_linear_vel = transform_tcp_velocity_to_base(
+                    tcp_linear_vel,
+                    current_tcp_orientation
+                )
+                
+                velocity_pos = base_linear_vel
+                velocity_rot = base_angular_vel
             
+            # ================================================================
+            # MODE 2: VERTICAL Z
+            # ================================================================
             elif mode == 2:
-                # VERTICAL_Z
                 velocity_pos, velocity_rot = self.movement_modes.calculate_vertical_z(
-                    robot_trans['z'], runtime_config.LINEAR_SPEED_SCALE)
+                    robot_trans['z'],
+                    runtime_config.LINEAR_SPEED_SCALE
+                )
             
+            # ================================================================
+            # MODE 3: LATERAL PRECISE
+            # ================================================================
             elif mode == 3:
-                # BASE_FRAME_ORIENT
-                velocity_pos, velocity_rot = self.movement_modes.calculate_base_frame_orientation(
-                    robot_rot['rx'], robot_rot['ry'], robot_rot['rz'],
-                    runtime_config.ANGULAR_SPEED_SCALE)
+                # Get TCP-frame lateral velocity
+                tcp_linear_vel, velocity_rot = self.movement_modes.calculate_lateral_precise(
+                    robot_trans['y'],
+                    runtime_config.LINEAR_SPEED_SCALE
+                )
+                
+                # Transform TCP-frame linear velocity to base frame
+                base_linear_vel = transform_tcp_velocity_to_base(
+                    tcp_linear_vel,
+                    current_tcp_orientation
+                )
+                
+                velocity_pos = base_linear_vel
             
+            # ================================================================
+            # MODE 4: WRIST ORIENTATION (Wrist 1 & 2) - CORRECTED
+            # ================================================================
             elif mode == 4:
-                # TCP_XY
-                velocity_pos, velocity_rot = self.movement_modes.calculate_tcp_xy(
-                    robot_trans['x'], robot_trans['y'], runtime_config.LINEAR_SPEED_SCALE)
+                # CORRECTED: Use rx (left/right) and rz (forward/back)
+                joint_velocities = self.movement_modes.calculate_wrist_joint_velocities(
+                    robot_rot['rx'],  # Left/right tilt → Wrist 1
+                    robot_rot['rz'],  # Forward/back tilt → Wrist 2
+                    runtime_config.ANGULAR_SPEED_SCALE
+                )
+                
+                # Update display velocities (for graphs - position locked in this mode)
+                self.current_velocity = np.array([0.0, 0.0, 0.0])
+                self.current_angular_velocity = np.array([
+                    joint_velocities[3],  # Wrist 1
+                    joint_velocities[4],  # Wrist 2
+                    0.0
+                ])
+                
+                # Check if there's any movement
+                is_moving = any(abs(v) > 0.0001 for v in joint_velocities)
+                
+                if not is_moving:
+                    # Send stop command
+                    self.rtde_controller.move_speed_joint(
+                        [0.0]*6,
+                        acceleration=2.0,
+                        mode_name=mode_name
+                    )
+                    return
+                
+                # CORRECTED: Use speedJ for direct wrist control
+                self.rtde_controller.move_speed_joint(
+                    joint_velocities,
+                    acceleration=2.0,
+                    mode_name=mode_name
+                )
+                return
             
+            # ================================================================
+            # MODE 5: WRIST SCREW (Wrist 3) - CORRECTED
+            # ================================================================
             elif mode == 5:
-                # TCP_Z
-                velocity_pos, velocity_rot = self.movement_modes.calculate_tcp_z(
-                    robot_trans['z'], runtime_config.LINEAR_SPEED_SCALE)
+                # CORRECTED: Use rx (left/right) for screwdriver motion
+                joint_velocities = self.movement_modes.calculate_wrist3_joint_velocity(
+                    robot_rot['rx'],  # Left/right tilt → Wrist 3
+                    runtime_config.ANGULAR_SPEED_SCALE
+                )
+                
+                # Update display velocities (for graphs - position locked in this mode)
+                self.current_velocity = np.array([0.0, 0.0, 0.0])
+                self.current_angular_velocity = np.array([
+                    0.0,
+                    0.0,
+                    joint_velocities[5]  # Wrist 3
+                ])
+                
+                # Check if there's any movement
+                is_moving = any(abs(v) > 0.0001 for v in joint_velocities)
+                
+                if not is_moving:
+                    # Send stop command
+                    self.rtde_controller.move_speed_joint(
+                        [0.0]*6,
+                        acceleration=2.0,
+                        mode_name=mode_name
+                    )
+                    return
+                
+                # CORRECTED: Use speedJ for direct wrist control
+                self.rtde_controller.move_speed_joint(
+                    joint_velocities,
+                    acceleration=2.0,
+                    mode_name=mode_name
+                )
+                return
             
+            # ================================================================
+            # MODE 6: TCP ORIENTATION MIMIC
+            # ================================================================
             elif mode == 6:
-                # TCP_ORIENT - Absolute control (Mimic)
+                # Absolute orientation control using servoL
                 hand_quat = imu_data['quaternion']
                 
-                # 1. Capture references on first run
+                # Capture references on first run
                 if self.mimic_ref_hand_quat is None:
                     self.mimic_ref_hand_quat = hand_quat
                     self.mimic_ref_robot_pose = self.rtde_controller.current_tcp_pose[:]
                     print(f"Mimic Mode Initialized. Ref Pose: {self.mimic_ref_robot_pose[:3]}")
                     return
                 
-                # 2. Calculate Hand Delta (Current - Ref)
+                # Calculate hand delta (Current - Ref)
                 delta_quat = quaternion_difference(self.mimic_ref_hand_quat, hand_quat)
                 
-                # 3. Convert delta to Rotation Vector
+                # Convert delta to rotation vector
                 delta_vec = quaternion_to_rotation_vector(delta_quat)
                 
-                # 4. Apply to Robot Reference Orientation
+                # Apply to robot reference orientation
                 ref_orientation = self.mimic_ref_robot_pose[3:6]
                 target_orientation = rotation_vector_add(ref_orientation, delta_vec)
                 
-                # 5. Construct Target Pose (Keep Ref Position)
+                # Construct target pose (keep ref position)
                 target_pose = self.mimic_ref_robot_pose[:3] + target_orientation
                 
-                # 6. Execute servoL
+                # Execute servoL
                 self.rtde_controller.move_servo(
                     target_pose,
                     velocity=0.5 * runtime_config.ANGULAR_SPEED_SCALE,
                     acceleration=0.5,
                     lookahead_time=0.05,
                     gain=500,
-                    mode_name=mode_name)
+                    mode_name=mode_name
+                )
                 return
             
-            # CHANGED: Direct pass-through (no momentum, no decay)
+            # ================================================================
+            # SEND VELOCITY COMMAND (Modes 1-3)
+            # ================================================================
+            
             # Update display velocities
             self.current_velocity = np.array(velocity_pos)
             self.current_angular_velocity = np.array(velocity_rot)
@@ -185,16 +306,22 @@ class ControlModeDispatcher:
             
             if not is_moving:
                 # Send stop command
-                self.rtde_controller.move_speed([0.0]*3, [0.0]*3, acceleration=1.0, mode_name=mode_name)
+                self.rtde_controller.move_speed(
+                    [0.0]*3, [0.0]*3, 
+                    acceleration=1.0, 
+                    mode_name=mode_name
+                )
                 return
             
-            # CHANGED: Direct velocity command with higher acceleration for responsiveness
+            # Send velocity command with appropriate acceleration
             self.rtde_controller.move_speed(
                 self.current_velocity.tolist(),
                 self.current_angular_velocity.tolist(),
-                acceleration=1.5,  # CHANGED: Increased from 0.5 to 1.5 for faster response
+                acceleration=1.5,
                 mode_name=mode_name
             )
         
         except Exception as e:
             print(f"Error executing mode {mode}: {e}")
+            import traceback
+            traceback.print_exc()

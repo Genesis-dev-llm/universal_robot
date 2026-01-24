@@ -73,7 +73,8 @@ CONTROL_PARAMS = {
     'tcp_translation': 0.0025,      # REDUCED: 0.005 -> 0.0025 (50% sensitivity)
     'tcp_vertical': 0.005,          
     'tcp_orientation': 0.030,       
-    'robot_orientation': 0.05,      
+    'robot_orientation': 0.05,
+    'wrist_rotation': 0.02,         # NEW: For wrist joint control (Modes 4 & 5)
 }
 
 # Movement filtering parameters
@@ -109,17 +110,17 @@ IMU_AXIS_MAPPING = {
 }
 
 #==============================================================================
-# CONTROL MODES
+# CONTROL MODES - REDESIGNED FOR CRANE + WRIST CONTROL
 #==============================================================================
 
 CONTROL_MODES = {
     0: "IDLE",
-    1: "BASE_FRAME_XY",      # Remapped: XY translation in base frame
-    2: "VERTICAL_Z",         # Vertical movement
-    3: "BASE_FRAME_ORIENT",  # Remapped: Orientation control in base frame (Rx, Ry, Rz)
-    4: "TCP_XY",             # Fine TCP XY positioning
-    5: "TCP_Z",              # Fine TCP vertical
-    6: "TCP_ORIENT"          # TCP orientation control
+    1: "CRANE_MODE",           # Forward/back translation + base rotation
+    2: "VERTICAL_Z",           # Pure vertical movement
+    3: "LATERAL_PRECISE",      # Precise left/right translation
+    4: "WRIST_ORIENT",         # Wrist 1 & 2 orientation control
+    5: "WRIST_SCREW",          # Wrist 3 rotation (screwdriver motion)
+    6: "TCP_ORIENT_MIMIC"      # Absolute orientation mimic mode
 }
 
 #==============================================================================
