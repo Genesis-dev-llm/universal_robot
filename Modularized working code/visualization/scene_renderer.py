@@ -16,14 +16,6 @@ class SceneRenderer:
     Handles 3D scene rendering for visualization
     """
     
-    _robot_model = None
-    
-    @classmethod
-    def initialize(cls):
-        """Initialize renderer resources (must correspond to GL context)"""
-        from visualization.ur5e_model import UR5eModel
-        cls._robot_model = UR5eModel()
-    
     @staticmethod
     def draw_grid():
         """Draw 3D reference grid"""
@@ -36,20 +28,6 @@ class SceneRenderer:
             glVertex3f(10, -2, i)
         glEnd()
     
-    @classmethod
-    def draw_robot(cls, joint_angles):
-        """
-        Draw robot model (UR5e)
-        
-        Args:
-            joint_angles: List of 6 joint angles in radians
-        """
-        if cls._robot_model:
-            cls._robot_model.render(joint_angles)
-        else:
-            # Fallback if not initialized
-            pass
-
     @staticmethod
     def draw_axes(length=2.0):
         """Draw RGB coordinate axes"""

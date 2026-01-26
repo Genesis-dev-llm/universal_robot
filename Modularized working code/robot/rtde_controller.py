@@ -73,11 +73,11 @@ class RTDEController:
         # Track last logged mode to reduce spam
         self.last_logged_mode = None
         
-        # CHANGED: Linear smoothing using rolling average
-        self.smoothing_window_size = config_mgr.get('safety', 'smoothing_window_size', 5) if config_mgr else 5
-        self.roll_history = deque(maxlen=self.smoothing_window_size)
-        self.pitch_history = deque(maxlen=self.smoothing_window_size)
-        self.yaw_history = deque(maxlen=self.smoothing_window_size)
+        # EXPONENTIAL SMOOTHING: Reverted to previous logic for better feel
+        self.smoothing_factor = config_mgr.get('safety', 'smoothing_factor', 0.15) if config_mgr else 0.15
+        self.smoothed_roll = None
+        self.smoothed_pitch = None
+        self.smoothed_yaw = None
         
         # Velocity ramping
         self.current_velocity_scale = 0.0
@@ -251,20 +251,23 @@ class RTDEController:
     
     def apply_smoothing(self, roll, pitch, yaw):
         """
-        CHANGED: Apply LINEAR smoothing using rolling average
-        Instead of exponential decay, we now average the last N samples
+        Apply exponential smoothing (Low Pass Filter)
+        smoothed = alpha * new + (1 - alpha) * old
         """
-        # Add new samples to history
-        self.roll_history.append(roll)
-        self.pitch_history.append(pitch)
-        self.yaw_history.append(yaw)
+        # First sample init
+        if self.smoothed_roll is None:
+            self.smoothed_roll = roll
+            self.smoothed_pitch = pitch
+            self.smoothed_yaw = yaw
+            return roll, pitch, yaw
+            
+        alpha = self.smoothing_factor
         
-        # Calculate simple average of all samples in window
-        smoothed_roll = sum(self.roll_history) / len(self.roll_history)
-        smoothed_pitch = sum(self.pitch_history) / len(self.pitch_history)
-        smoothed_yaw = sum(self.yaw_history) / len(self.yaw_history)
+        self.smoothed_roll = (1 - alpha) * self.smoothed_roll + alpha * roll
+        self.smoothed_pitch = (1 - alpha) * self.smoothed_pitch + alpha * pitch
+        self.smoothed_yaw = (1 - alpha) * self.smoothed_yaw + alpha * yaw
         
-        return smoothed_roll, smoothed_pitch, smoothed_yaw
+        return self.smoothed_roll, self.smoothed_pitch, self.smoothed_yaw
     
     def calculate_velocity_scale(self, roll, pitch, yaw):
         """Scale velocity based on IMU movement speed"""

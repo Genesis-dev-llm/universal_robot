@@ -45,24 +45,26 @@ class CoordinateFrameTransform:
         
         # Robot Base Frame Mapping (UR Convention)
         # Maps Standard IMU axes to UR robot base frame
+        # NOTE: These are the original values - test with robot before changing
         self.robot_translation_map = {
-            'x': ('roll', 1),     # CHANGED: Was -1, now +1 (forward tilt = forward movement)
-            'y': ('pitch', -1),   # Tilt left/right → Robot Y (inverted)
-            'z': ('pitch', 1)     # Tilt forward/back → Robot Z (for vertical mode)
+            'x': ('roll', 1),     # Forward tilt = forward movement
+            'y': ('pitch', -1),   # Tilt left/right → Robot Y
+            'z': ('pitch', 1)     # Mode 2 vertical
         }
         
         self.robot_rotation_map = {
-            'rx': ('pitch', 1),   # Tilt left/right → Rotate around X (roll)
-            'ry': ('yaw', -1),    # Twist wrist → Rotate around Y (yaw, inverted)
-            'rz': ('roll', 1)     # Tilt forward/back → Rotate around Z (pitch)
+            'rx': ('pitch', 1),   # Tilt left/right → Rotate around X
+            'ry': ('yaw', -1),    # Twist wrist → Rotate around Y
+            'rz': ('roll', 1)     # Tilt forward/back → Rotate around Z
         }
         
         # Visualization (OpenGL Cube) Frame Mapping
         # Maps Standard IMU to OpenGL cube rotations
+        # UPDATED: Mirror-style control (cube faces away, moves with you)
         self.visualization_map = {
-            'x': ('pitch', 1),    # Nod (forward/back) → Cube X rotation
-            'y': ('yaw', -1),     # Shake head (twist) → Cube Y rotation (inverted)
-            'z': ('roll', 1)      # Tilt ear to shoulder → Cube Z rotation
+            'x': ('pitch', -1),   # INVERTED: Nod forward → cube nods away from you
+            'y': ('yaw', 1),      # INVERTED: Look left → cube looks left (your perspective)
+            'z': ('roll', 1)      # Tilt ear to shoulder → Cube Z rotation (unchanged)
         }
     
     def sensor_to_standard(self, bno_euler: Dict[str, float]) -> Dict[str, float]:

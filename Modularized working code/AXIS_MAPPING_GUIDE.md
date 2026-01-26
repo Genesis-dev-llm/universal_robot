@@ -1,60 +1,61 @@
-# IMU to Robot Axis Mapping Guide
+# IMU Control Mapping Guide
 
-## Current Setup (As of Jan 2026)
-Based on your glove layout, the BNO085 sensor is mounted 90° rotated relative to the "standard" forward direction.
+## Physical Gesture → Control Action
 
-### Physical Mapping
-| User Action (Glove) | BNO Sensor Readings | Mapped to Robot Axis |
-|---------------------|---------------------|----------------------|
-| **Tilt Forward/Back** | **Roll** | **X Axis** (Forward/Back) |
-| **Tilt Left/Right** | **Pitch** | **Y Axis** (Left/Right) |
-| **Twist Wrist** | **Yaw** | **Rotation (Ry/Shake Head)** |
-| **Nod Hand (Fwd/Back)** | **Roll** | **Rotation (Rz/Tilt)** |
-| **Tilt Hand (Side-to-Side)** | **Pitch** | **Roll (Rx/Tilt)** |
+### Your Setup
+- **Visualization**: Cube is "in front of you", facing away (mirror-style)
+- **BNO085 Mounting**: 90° rotated on glove
 
 ---
 
-## 3D Cube (Visualizer) Mapping
-The 3D cube axes are now synchronized with your glove:
+## Mode Mappings
 
-| Movement | Cube Axis | Sensor Axis | Current Invert |
-|----------|-----------|-------------|----------------|
-| **Nod (Down/Up)** | **X** | **Pitch** | `False` |
-| **Shake Head (L/R)** | **Y** | **Yaw** | `True` |
-| **Tilt (Ear to Shoulder)** | **Z** | **Roll** | `False` |
+| Mode | Gesture | Effect |
+|------|---------|--------|
+| **1: CRANE** | Nod forward/back | TCP moves **away**/toward you |
+| **1: CRANE** | Tilt left/right | Base rotates left/right (crane swing) |
+| **2: VERTICAL** | Nod forward | TCP moves **up** |
+| **2: VERTICAL** | Nod back | TCP moves **down** |
+| **3: LATERAL** | Tilt left | TCP moves **left** (your perspective) |
+| **3: LATERAL** | Tilt right | TCP moves **right** (your perspective) |
+| **4: WRIST 1&2** | Tilt left/right | Wrist 1 rotates |
+| **4: WRIST 1&2** | Nod forward/back | Wrist 2 rotates |
+| **5: WRIST 3** | Tilt left/right | Wrist 3 (screwdriver) rotates |
+| **6: ORIENT MIMIC** | Full orientation | TCP mimics your hand orientation |
 
-> [!TIP]
-> This configuration ensures that tilting your hand forward makes the cube nod forward, and twisting your wrist shakes the head correctly. 
+---
 
-## How to Configure
-All settings are located in:  
-`config/constants.py`
+## Technical Mapping (coordinate_frames.py)
 
-Look for the `IMU_AXIS_MAPPING` dictionary:
-
-```python
-IMU_AXIS_MAPPING = {
-    # Forward/Back Movement
-    'x_axis': 'roll',      # Uses Glove Forward/Back
-    'x_invert': False,     # Change to True if Forward moves Backward
-
-    # Left/Right Movement
-    'y_axis': 'pitch',     # Uses Glove Left/Right
-    'y_invert': False,     # Inverted back (Left moves Left)
-    
-    # ...
-}
+### Translation (Modes 1-3)
+```
+Robot X ← -roll   (nod: forward→away, back→toward)
+Robot Y ← +pitch  (tilt: left→left, right→right)  
+Robot Z ← +pitch  (Mode 2: forward→up)
 ```
 
-## Troubleshooting Directions
+### Rotation (Modes 4-6)
+```
+Robot RX ← -pitch (tilt left/right - INVERTED)
+Robot RY ← -yaw   (wrist twist)
+Robot RZ ← +roll  (nod forward/back)
+```
 
-1.  **Run the visualizer:** `./run.sh`
-2.  **Tilt Glove Forward:** 
-    *   If Robot moves **Backward** -> Set `'x_invert': False` (Toggle it)
-3.  **Tilt Glove Left:**
-    *   If Robot moves **Right** -> Set `'y_invert': True` (Toggle it)
-4.  **Tilt Glove Up:**
-    *   If Robot moves **Down** -> Set `'z_invert': True` (in `z_invert` section)
+### Visualization (Cube)
+```
+Cube X ← -pitch  (nod forward → cube nods away)
+Cube Y ← +yaw    (look left → cube looks left from your view)
+Cube Z ← +roll   (tilt → cube tilts same direction)
+```
 
-## Why did we change this?
-Original code assumed `Roll = X` and `Pitch = Y`. However, due to the sensor mounting on your specific glove, the axes were swapped. We updated the mapping to align the **Physical Gesture** with the **Robot Movement**.
+---
+
+## Inversion Summary
+
+| Axis | Old Sign | New Sign | Reason |
+|------|----------|----------|--------|
+| Translation X (Mode 1) | +1 | **-1** | Forward tilt → move away |
+| Translation Y (Mode 1, 3) | -1 | **+1** | Tilt left → move left |
+| Rotation RX (Modes 4,5,6) | +1 | **-1** | Tilt left → rotate correct way |
+| Viz X | +1 | **-1** | Mirror-style cube facing |
+| Viz Y | -1 | **+1** | Mirror-style cube facing |

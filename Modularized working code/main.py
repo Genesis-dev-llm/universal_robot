@@ -43,7 +43,6 @@ from robot.control_modes import ControlModeDispatcher
 # Import visualization
 from visualization.scene_renderer import SceneRenderer
 from visualization.gui_overlay import GUIOverlay
-from visualization.graph_renderer import GraphRenderer
 
 #==============================================================================
 # VISUALIZATION STATE
@@ -277,7 +276,6 @@ def main():
     
     # Initialize visualization
     vis_state = VisualizationState()
-    SceneRenderer.initialize()
     scene_renderer = SceneRenderer()
     gui_overlay = GUIOverlay()
     
@@ -287,18 +285,6 @@ def main():
     
     # Initialize control mode dispatcher
     control_dispatcher = ControlModeDispatcher(rtde_controller)
-    
-    # Initialize Graphs
-    graph_width = 210
-    graph_height = 80
-    graph_x = display_width - 220
-    graph_y_start = 180
-    
-    lin_vel_graph = GraphRenderer("Linear Vel (m/s)", graph_x, graph_y_start, 
-                                 graph_width, graph_height, color=(0, 255, 0), y_range=(0, 0.5))
-    
-    ang_vel_graph = GraphRenderer("Angular Vel (rad/s)", graph_x, graph_y_start + graph_height + 20, 
-                                 graph_width, graph_height, color=(255, 255, 0), y_range=(0, 1.0))
     
     # Initialize IMU communication (GRACEFUL FAILURE)
     print("Connecting to IMU...")
@@ -432,16 +418,6 @@ def main():
                 vis_state, rtde_controller, imu_calibration, runtime_config, 
                 control_dispatcher, imu_connected)
             gui_overlay.draw_status_text(status_lines, display)
-            
-            # Render and update Graphs
-            current_lin_speed = np.linalg.norm(control_dispatcher.current_velocity)
-            current_ang_speed = np.linalg.norm(control_dispatcher.current_angular_velocity)
-            
-            lin_vel_graph.add_value(current_lin_speed)
-            ang_vel_graph.add_value(current_ang_speed)
-            
-            lin_vel_graph.render()
-            ang_vel_graph.render()
             
             gui_overlay.restore_3d_projection()
             

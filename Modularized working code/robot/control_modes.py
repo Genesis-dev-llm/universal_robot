@@ -181,10 +181,10 @@ class ControlModeDispatcher:
             # MODE 4: WRIST ORIENTATION (Wrist 1 & 2) - CORRECTED
             # ================================================================
             elif mode == 4:
-                # CORRECTED: Use rx (left/right) and rz (forward/back)
+                # FIXED: nod→Wrist1(nod), tilt→Wrist2(tilt)
                 joint_velocities = self.movement_modes.calculate_wrist_joint_velocities(
-                    robot_rot['rx'],  # Left/right tilt → Wrist 1
-                    robot_rot['rz'],  # Forward/back tilt → Wrist 2
+                    robot_rot['rz'],  # Nod forward/back → Wrist 1 (nod joint)
+                    robot_rot['rx'],  # Tilt left/right → Wrist 2 (tilt joint)
                     runtime_config.ANGULAR_SPEED_SCALE
                 )
                 
