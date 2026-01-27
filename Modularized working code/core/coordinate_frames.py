@@ -2,17 +2,20 @@
 Universal Coordinate Frame Transform System
 Handles all transformations between sensor, visualization, and robot frames
 
-Design:
-    BNO085 Raw → Standard IMU Frame → Target Frames (Robot/Visualization)
+SENSOR BEHAVIOR (BNO085 on glove):
+    - NOD forward/back (look up/down) → PITCH changes
+    - TILT left/right (ear to shoulder) → ROLL changes
+    - TWIST wrist (doorknob rotation) → YAW changes
+
+COORDINATE SYSTEM:
+    BNO085 Raw Data → Standard IMU Frame → Target Frames (Robot/Visualization)
     
 Standard IMU Frame (Right-Handed):
-    +X = Forward (toward fingers when hand extended)
-    +Y = Left (thumb direction when palm down)
+    +X = Forward (fingers pointing direction)
+    +Y = Left (thumb direction)
     +Z = Up (back of hand direction)
 
-CHANGES:
-- Fixed translation_x inversion: Changed from -1 to +1
-- Forward tilt (positive roll) now produces forward movement (positive X)
+FIXED: All axis mappings now correctly match physical sensor behavior
 """
 
 import numpy as np
@@ -22,54 +25,84 @@ from typing import Dict, Tuple
 class CoordinateFrameTransform:
     """
     Universal coordinate frame transformation system.
-    Provides clean separation between sensor mounting and target frame usage.
+    Maps BNO085 sensor data to robot commands and visualization.
+    
+    All signs are +1 for natural "mirror" control - your movements
+    directly map to robot/visualization movements in the same direction.
     """
     
     def __init__(self):
         """
-        Initialize transform system with BNO085 mounting configuration.
+        Initialize transform system with corrected BNO085 mappings.
         
-        Based on physical mounting (from AXIS_MAPPING_GUIDE.md):
-        - User tilts forward/back → BNO reads ROLL
-        - User tilts left/right → BNO reads PITCH  
-        - User twists wrist → BNO reads YAW
+        Physical Sensor Behavior:
+        - User NODS hand up/down → BNO085 PITCH changes
+        - User TILTS hand left/right → BNO085 ROLL changes
+        - User TWISTS wrist → BNO085 YAW changes
         """
         
-        # BNO085 is mounted 90° rotated relative to standard orientation
-        # This mapping corrects for the physical mounting
+        # Sensor mounting configuration (currently 1:1 pass-through)
+        # The BNO085 reports standard Euler angles that we use directly
         self.sensor_mounting = {
-            'roll': 'roll',    # BNO roll = Standard roll (forward/back tilt)
-            'pitch': 'pitch',  # BNO pitch = Standard pitch (left/right tilt)
-            'yaw': 'yaw'       # BNO yaw = Standard yaw (twist)
+            'roll': 'roll',    # Tilt gesture
+            'pitch': 'pitch',  # Nod gesture
+            'yaw': 'yaw'       # Twist gesture
         }
         
-        # Robot Base Frame Mapping (UR Convention)
-        # Maps Standard IMU axes to UR robot base frame
-        # NOTE: These are the original values - test with robot before changing
+        # ================================================================
+        # ROBOT BASE FRAME MAPPING (UR Convention)
+        # Maps hand gestures to robot translation commands
+        # ================================================================
         self.robot_translation_map = {
-            'x': ('roll', 1),     # Forward tilt = forward movement
-            'y': ('pitch', -1),   # Tilt left/right → Robot Y
-            'z': ('pitch', 1)     # Mode 2 vertical
+            # Mode 1: NOD forward/back → TCP moves forward/back (relative to tool)
+            # Mode 2: NOD up/down → Robot moves up/down vertically
+            'x': ('pitch', 1),    # Nod controls forward/back movement
+            
+            # Mode 1: TILT left/right → Base rotates (crane swing)
+            # Mode 3: TILT left/right → TCP moves left/right (relative to tool)
+            'y': ('roll', 1),     # Tilt controls lateral movement / base rotation
+            
+            # Mode 2: NOD up/down → Vertical movement
+            'z': ('pitch', 1)     # Nod controls vertical movement
         }
         
+        # ================================================================
+        # ROBOT ROTATION MAPPING (Joint Control)
+        # Maps hand gestures to robot orientation/joint commands
+        # ================================================================
         self.robot_rotation_map = {
-            'rx': ('pitch', 1),   # Tilt left/right → Rotate around X
-            'ry': ('yaw', -1),    # Twist wrist → Rotate around Y
-            'rz': ('roll', 1)     # Tilt forward/back → Rotate around Z
+            # Mode 4: TILT left/right → Wrist 2 rotates
+            # Mode 5: TILT left/right → Wrist 3 rotates (screwdriver)
+            'rx': ('roll', 1),    # Tilt controls wrist rotations
+            
+            # Future use: Twist controls orientation around Y-axis
+            'ry': ('yaw', 1),     # Twist (not currently used in modes 1-5)
+            
+            # Mode 1: Base rotation uses this via robot_trans['y']
+            # Mode 4: NOD up/down → Wrist 1 rotates
+            'rz': ('pitch', 1)    # Nod controls base/wrist rotation
         }
         
-        # Visualization (OpenGL Cube) Frame Mapping
-        # Maps Standard IMU to OpenGL cube rotations
-        # UPDATED: Mirror-style control (cube faces away, moves with you)
+        # ================================================================
+        # VISUALIZATION (OpenGL Cube) FRAME MAPPING
+        # Maps hand gestures to cube display rotations
+        # "Mirror-style" control - cube faces away, mimics your hand
+        # ================================================================
         self.visualization_map = {
-            'x': ('pitch', -1),   # INVERTED: Nod forward → cube nods away from you
-            'y': ('yaw', 1),      # INVERTED: Look left → cube looks left (your perspective)
-            'z': ('roll', 1)      # Tilt ear to shoulder → Cube Z rotation (unchanged)
+            # NOD down → Cube nods away from you (mirrors your nod)
+            'x': ('pitch', 1),    # Nod gesture → Cube pitch rotation
+            
+            # TWIST clockwise → Cube twists clockwise (from your view)
+            'y': ('yaw', 1),      # Twist gesture → Cube yaw rotation
+            
+            # TILT right → Cube tilts right (mirrors your tilt)
+            'z': ('roll', 1)      # Tilt gesture → Cube roll rotation
         }
     
     def sensor_to_standard(self, bno_euler: Dict[str, float]) -> Dict[str, float]:
         """
         Convert BNO085 sensor frame to Standard IMU frame.
+        Currently 1:1 pass-through as sensor reports standard Euler angles.
         
         Args:
             bno_euler: Dict with 'roll', 'pitch', 'yaw' in degrees from BNO085
@@ -77,8 +110,6 @@ class CoordinateFrameTransform:
         Returns:
             Dict with 'roll', 'pitch', 'yaw' in Standard IMU frame
         """
-        # Currently 1:1 mapping since mounting correction is already handled
-        # in the sensor_mounting definition
         return {
             'roll': bno_euler['roll'],
             'pitch': bno_euler['pitch'],
@@ -94,6 +125,7 @@ class CoordinateFrameTransform:
         Args:
             imu_euler: Standard IMU Euler angles in degrees
             mapping: Dictionary mapping target axes to (source_axis, sign)
+                    Example: {'x': ('pitch', 1)} means target X = source pitch * 1
         
         Returns:
             Dict with mapped values for each target axis
@@ -106,42 +138,58 @@ class CoordinateFrameTransform:
     def to_robot_translation(self, imu_euler: Dict[str, float]) -> Dict[str, float]:
         """
         Convert Standard IMU frame to Robot translation deltas.
+        Used by Modes 1, 2, 3 for movement commands.
         
         Args:
             imu_euler: Standard IMU Euler angles in degrees
         
         Returns:
             Dict with 'x', 'y', 'z' translation values for robot base frame
+            
+        Examples:
+            - Nod forward → {'x': +10, 'y': 0, 'z': +10}
+            - Tilt right → {'x': 0, 'y': +5, 'z': 0}
         """
         return self.apply_mapping(imu_euler, self.robot_translation_map)
     
     def to_robot_rotation(self, imu_euler: Dict[str, float]) -> Dict[str, float]:
         """
         Convert Standard IMU frame to Robot rotation deltas.
+        Used by Modes 4, 5 for joint/orientation commands.
         
         Args:
             imu_euler: Standard IMU Euler angles in degrees
         
         Returns:
             Dict with 'rx', 'ry', 'rz' rotation values for robot orientation
+            
+        Examples:
+            - Nod forward → {'rx': 0, 'ry': 0, 'rz': +10}
+            - Tilt right → {'rx': +5, 'ry': 0, 'rz': 0}
         """
         return self.apply_mapping(imu_euler, self.robot_rotation_map)
     
     def to_visualization(self, imu_euler: Dict[str, float]) -> Dict[str, float]:
         """
         Convert Standard IMU frame to OpenGL visualization rotations.
+        Creates "mirror-style" control for the cube display.
         
         Args:
             imu_euler: Standard IMU Euler angles in degrees
         
         Returns:
             Dict with 'x', 'y', 'z' rotation values for OpenGL cube
+            
+        Examples:
+            - Nod down → Cube nods away from you
+            - Twist right → Cube twists right (from your perspective)
         """
         return self.apply_mapping(imu_euler, self.visualization_map)
     
     def apply_quaternion_mapping(self, quaternion: np.ndarray) -> np.ndarray:
         """
         Apply coordinate transform to a quaternion for visualization.
+        Converts quaternion to Euler, applies mapping, converts back.
         
         Args:
             quaternion: [qi, qj, qk, qr] from BNO085
@@ -149,13 +197,12 @@ class CoordinateFrameTransform:
         Returns:
             Transformed quaternion for OpenGL rendering
         """
-        # Convert quaternion to Euler, apply mapping, convert back
         from core.math_utils import quat_to_euler, euler_to_quat
         
         # Extract Euler angles (in radians)
         rx, ry, rz = quat_to_euler(quaternion)
         
-        # Convert to degrees
+        # Convert to degrees for mapping
         imu_euler = {
             'roll': math.degrees(rx),
             'pitch': math.degrees(ry),
@@ -175,29 +222,40 @@ class CoordinateFrameTransform:
         return mapped_quat
     
     def get_info(self) -> str:
-        """Return human-readable description of current frame mappings."""
+        """
+        Return human-readable description of current frame mappings.
+        Useful for debugging and verification.
+        """
         info = []
         info.append("="*70)
         info.append("COORDINATE FRAME MAPPINGS")
         info.append("="*70)
+        info.append("\n[SENSOR BEHAVIOR]")
+        info.append("  NOD forward/back → PITCH changes")
+        info.append("  TILT left/right → ROLL changes")
+        info.append("  TWIST wrist → YAW changes")
+        
         info.append("\n[ROBOT TRANSLATION]")
         for axis, (source, sign) in self.robot_translation_map.items():
             sign_str = "+" if sign > 0 else "-"
-            info.append(f"  Robot {axis.upper()}: {sign_str}{source}")
+            gesture = "NOD" if source == "pitch" else "TILT" if source == "roll" else "TWIST"
+            info.append(f"  Robot {axis.upper()}: {sign_str}{source} ({gesture})")
         
         info.append("\n[ROBOT ROTATION]")
         for axis, (source, sign) in self.robot_rotation_map.items():
             sign_str = "+" if sign > 0 else "-"
-            info.append(f"  Robot {axis.upper()}: {sign_str}{source}")
+            gesture = "NOD" if source == "pitch" else "TILT" if source == "roll" else "TWIST"
+            info.append(f"  Robot {axis.upper()}: {sign_str}{source} ({gesture})")
         
         info.append("\n[VISUALIZATION]")
         for axis, (source, sign) in self.visualization_map.items():
             sign_str = "+" if sign > 0 else "-"
-            info.append(f"  Cube {axis.upper()}: {sign_str}{source}")
+            gesture = "NOD" if source == "pitch" else "TILT" if source == "roll" else "TWIST"
+            info.append(f"  Cube {axis.upper()}: {sign_str}{source} ({gesture})")
         
         info.append("="*70)
         return "\n".join(info)
 
 
-# Global instance for easy access
+# Global instance for easy access throughout the codebase
 frame_transform = CoordinateFrameTransform()

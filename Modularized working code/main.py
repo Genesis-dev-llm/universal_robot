@@ -6,6 +6,7 @@ CHANGES:
 - Fixed cube rotation for linear modes (stays upright)
 - Cube only rotates in orientation modes (4, 5, 6)
 - Terminal spam eliminated (mode changes only)
+- FIXED: Proper Robot→OpenGL coordinate frame conversion
 
 Author: Professional Refactored Version
 Date: January 2025
@@ -45,14 +46,19 @@ from visualization.scene_renderer import SceneRenderer
 from visualization.gui_overlay import GUIOverlay
 
 #==============================================================================
-# VISUALIZATION STATE
+# VISUALIZATION STATE - FIXED COORDINATE MAPPING
 #==============================================================================
 
 class VisualizationState:
     """
     Manages 3D visualization state (cube position, velocity, rotation)
     
-    REDESIGNED: Cube rotation now mode-dependent
+    FIXED: Properly maps Robot coordinate frame to OpenGL coordinate frame
+    - Robot X (forward/back) → OpenGL Z (depth)
+    - Robot Y (left/right) → OpenGL X (horizontal)
+    - Robot Z (up/down) → OpenGL Y (vertical)
+    
+    MODE BEHAVIOR:
     - Linear modes (1, 2, 3): Cube stays upright, position updates only
     - Orientation modes (4, 5, 6): Cube rotates to match hand orientation
     """
@@ -116,14 +122,28 @@ class VisualizationState:
                 self.velocity = np.array([0.0, 0.0, 0.0])
             self.velocity *= (VELOCITY_DECAY - 0.15)
         
+        # ================================================================
+        # FIXED: Properly map Robot coordinates to OpenGL coordinates
+        # ================================================================
+        # Robot X (forward/back) → OpenGL Z (depth/away from camera)
+        # Robot Y (left/right) → OpenGL X (horizontal on screen)
+        # Robot Z (up/down) → OpenGL Y (vertical on screen)
+        # ================================================================
+        
         # Update velocity based on mode (position changes for linear modes only)
         if self.current_mode == 1:  # CRANE MODE
-            self.velocity[0] += viz_trans['x'] * 0.001 * runtime_config.LINEAR_SPEED_SCALE
+            # FIXED: Robot X (forward/back) → OpenGL Z (depth)
+            self.velocity[2] += viz_trans['x'] * 0.001 * runtime_config.LINEAR_SPEED_SCALE
             # Note: Base rotation doesn't affect cube position in visualization
+            
         elif self.current_mode == 2:  # VERTICAL_Z
+            # Robot Z (up/down) → OpenGL Y (vertical) - Already correct!
             self.velocity[1] += viz_trans['z'] * 0.001 * runtime_config.LINEAR_SPEED_SCALE
+            
         elif self.current_mode == 3:  # LATERAL_PRECISE
-            self.velocity[2] += viz_trans['y'] * 0.001 * runtime_config.LINEAR_SPEED_SCALE
+            # FIXED: Robot Y (left/right) → OpenGL X (horizontal)
+            self.velocity[0] -= viz_trans['y'] * 0.001 * runtime_config.LINEAR_SPEED_SCALE
+        
         # Modes 4, 5, 6: Position locked, only rotation updates (already handled above)
     
     def update_physics(self):
