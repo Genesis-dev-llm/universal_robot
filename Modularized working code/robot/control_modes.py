@@ -1,13 +1,19 @@
 """
-Control Mode Dispatcher - CORRECTED
+Control Mode Dispatcher - Mode 1 Priority System
 Handles logic for different robot control modes
+
+MODE 1 PRIORITY SYSTEM:
+- Compares abs(x_delta) vs abs(y_delta)
+- Dominant input wins:
+  * If left/right tilt stronger: Use speedJ for base rotation
+  * If forward/back tilt stronger: Use speedL for TCP translation
+- 5° deadzone prevents accidental dual triggering
 
 FIXES:
 - Modes 4 & 5 now use speedJ (direct joint control)
 - Fixed axis mappings for wrist control
-- Removed momentum/velocity accumulation
-- Direct pass-through of scaled input values
-- Added TCP-to-Base frame transformation for intuitive control
+- Mode 1 uses conditional command type based on input priority
+- TCP-to-Base frame transformation for intuitive control
 - Fixed terminal spam (only logs mode changes)
 """
 
@@ -130,25 +136,58 @@ class ControlModeDispatcher:
             velocity_rot = [0.0, 0.0, 0.0]
             
             # ================================================================
-            # MODE 1: CRANE MODE
+            # MODE 1: CRANE MODE - PRIORITY SYSTEM
             # ================================================================
             if mode == 1:
-                # Get TCP-frame linear velocity and base-frame angular velocity
+                # Calculate both movements
                 tcp_linear_vel, base_angular_vel = self.movement_modes.calculate_crane_mode(
                     robot_trans['x'],  # Forward/back
-                    robot_trans['y'],  # Left/right (becomes base rotation)
+                    robot_trans['y'],  # Left/right
                     runtime_config.LINEAR_SPEED_SCALE,
                     runtime_config.ANGULAR_SPEED_SCALE
                 )
                 
-                # Transform TCP-frame linear velocity to base frame
-                base_linear_vel = transform_tcp_velocity_to_base(
-                    tcp_linear_vel,
-                    current_tcp_orientation
-                )
+                # PRIORITY SYSTEM: Compare absolute values
+                abs_x = abs(robot_trans['x'])  # Forward/back magnitude
+                abs_y = abs(robot_trans['y'])  # Left/right magnitude
                 
-                velocity_pos = base_linear_vel
-                velocity_rot = base_angular_vel
+                # Decide which command to send based on dominant input
+                if abs_y > abs_x:
+                    # LEFT/RIGHT DOMINANT: Use speedJ for base rotation
+                    joint_velocities = self.movement_modes.calculate_base_rotation_joint_velocity(
+                        robot_trans['y'],
+                        runtime_config.ANGULAR_SPEED_SCALE
+                    )
+                    
+                    # Update display velocities
+                    self.current_velocity = np.array([0.0, 0.0, 0.0])
+                    self.current_angular_velocity = np.array([0.0, 0.0, joint_velocities[0]])
+                    
+                    # Check if there's movement
+                    is_moving = abs(joint_velocities[0]) > 0.0001
+                    
+                    if not is_moving:
+                        self.rtde_controller.move_speed_joint([0.0]*6, acceleration=2.0, mode_name=mode_name)
+                        return
+                    
+                    # Send speedJ for base rotation
+                    self.rtde_controller.move_speed_joint(
+                        joint_velocities,
+                        acceleration=2.0,
+                        mode_name=mode_name
+                    )
+                    return
+                
+                else:
+                    # FORWARD/BACK DOMINANT: Use speedL for TCP translation
+                    # Transform TCP-frame linear velocity to base frame
+                    base_linear_vel = transform_tcp_velocity_to_base(
+                        tcp_linear_vel,
+                        current_tcp_orientation
+                    )
+                    
+                    velocity_pos = base_linear_vel
+                    velocity_rot = [0.0, 0.0, 0.0]  # No rotation when translating
             
             # ================================================================
             # MODE 2: VERTICAL Z
@@ -181,14 +220,13 @@ class ControlModeDispatcher:
             # MODE 4: WRIST ORIENTATION (Wrist 1 & 2) - CORRECTED
             # ================================================================
             elif mode == 4:
-                # FIXED: nod→Wrist1(nod), tilt→Wrist2(tilt)
                 joint_velocities = self.movement_modes.calculate_wrist_joint_velocities(
-                    robot_rot['rz'],  # Nod forward/back → Wrist 1 (nod joint)
-                    robot_rot['rx'],  # Tilt left/right → Wrist 2 (tilt joint)
+                    robot_rot['rx'],  # Tilt left/right → Wrist 1
+                    robot_rot['rz'],  # Nod forward/back → Wrist 2
                     runtime_config.ANGULAR_SPEED_SCALE
                 )
                 
-                # Update display velocities (for graphs - position locked in this mode)
+                # Update display velocities (position locked in this mode)
                 self.current_velocity = np.array([0.0, 0.0, 0.0])
                 self.current_angular_velocity = np.array([
                     joint_velocities[3],  # Wrist 1
@@ -200,15 +238,10 @@ class ControlModeDispatcher:
                 is_moving = any(abs(v) > 0.0001 for v in joint_velocities)
                 
                 if not is_moving:
-                    # Send stop command
-                    self.rtde_controller.move_speed_joint(
-                        [0.0]*6,
-                        acceleration=2.0,
-                        mode_name=mode_name
-                    )
+                    self.rtde_controller.move_speed_joint([0.0]*6, acceleration=2.0, mode_name=mode_name)
                     return
                 
-                # CORRECTED: Use speedJ for direct wrist control
+                # Use speedJ for direct wrist control
                 self.rtde_controller.move_speed_joint(
                     joint_velocities,
                     acceleration=2.0,
@@ -220,13 +253,12 @@ class ControlModeDispatcher:
             # MODE 5: WRIST SCREW (Wrist 3) - CORRECTED
             # ================================================================
             elif mode == 5:
-                # CORRECTED: Use rx (left/right) for screwdriver motion
                 joint_velocities = self.movement_modes.calculate_wrist3_joint_velocity(
                     robot_rot['rx'],  # Left/right tilt → Wrist 3
                     runtime_config.ANGULAR_SPEED_SCALE
                 )
                 
-                # Update display velocities (for graphs - position locked in this mode)
+                # Update display velocities (position locked in this mode)
                 self.current_velocity = np.array([0.0, 0.0, 0.0])
                 self.current_angular_velocity = np.array([
                     0.0,
@@ -238,15 +270,10 @@ class ControlModeDispatcher:
                 is_moving = any(abs(v) > 0.0001 for v in joint_velocities)
                 
                 if not is_moving:
-                    # Send stop command
-                    self.rtde_controller.move_speed_joint(
-                        [0.0]*6,
-                        acceleration=2.0,
-                        mode_name=mode_name
-                    )
+                    self.rtde_controller.move_speed_joint([0.0]*6, acceleration=2.0, mode_name=mode_name)
                     return
                 
-                # CORRECTED: Use speedJ for direct wrist control
+                # Use speedJ for direct wrist control
                 self.rtde_controller.move_speed_joint(
                     joint_velocities,
                     acceleration=2.0,
@@ -293,7 +320,7 @@ class ControlModeDispatcher:
                 return
             
             # ================================================================
-            # SEND VELOCITY COMMAND (Modes 1-3)
+            # SEND VELOCITY COMMAND (Modes 1-3 speedL path)
             # ================================================================
             
             # Update display velocities

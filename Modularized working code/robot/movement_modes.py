@@ -8,7 +8,7 @@ UR BASE FRAME CONVENTION (ISO 9787):
     Z-axis: Down (-) / Up (+)
 
 REDESIGNED MODE SYSTEM:
-- Mode 1: Crane control (TCP translation + base rotation)
+- Mode 1: Crane control (TCP translation OR base rotation - priority based)
 - Mode 2: Vertical Z control
 - Mode 3: Lateral precise control (TCP-relative)
 - Mode 4: Wrist 1 & 2 direct joint control (speedJ)
@@ -17,9 +17,11 @@ REDESIGNED MODE SYSTEM:
 
 FIXES APPLIED:
 - Mode 1: Forward/back now uses Y-axis (was X-axis)
+- Mode 1: Base rotation uses speedJ for true crane behavior
 - Mode 3: Left/right now uses X-axis (was Y-axis)
 - Mode 4: Wrist 1 rotation direction inverted
 - Mode 5: Wrist 3 rotation direction inverted
+- Deadzone increased to 5° for all modes
 """
 
 from config.constants import CONTROL_PARAMS
@@ -32,6 +34,7 @@ class MovementModes:
     Returns:
     - Modes 1-3: Velocities for speedL (linear + angular in appropriate frames)
     - Modes 4-5: Joint velocities for speedJ (6-element array)
+    - Mode 1 base rotation: Joint velocities for speedJ (6-element array)
     """
     
     @staticmethod
@@ -42,6 +45,10 @@ class MovementModes:
         Behavior:
         - Forward/Back tilt → TCP moves forward/back (UR Y-axis in TCP frame)
         - Left/Right tilt → Base rotates (crane-like swing)
+        
+        NOTE: This returns TCP-frame linear velocity. The control dispatcher
+        will decide whether to use speedL (for translation) or speedJ (for rotation)
+        based on which input is dominant.
         
         Args:
             x_delta: Forward/back input (degrees)
@@ -69,6 +76,33 @@ class MovementModes:
         ]
         
         return (linear_velocity, angular_velocity)
+    
+    @staticmethod
+    def calculate_base_rotation_joint_velocity(y_delta, angular_scale):
+        """
+        MODE 1: Base Rotation (speedJ variant)
+        
+        Calculates joint velocity for ONLY base rotation (Joint 0).
+        Used when left/right tilt is dominant in Mode 1.
+        
+        Args:
+            y_delta: Left/right input (degrees)
+            angular_scale: Angular speed multiplier
+        
+        Returns:
+            List of 6 joint velocities [q0, q1, q2, q3, q4, q5]
+            Only Joint 0 (base) has non-zero value
+        """
+        joint_velocities = [
+            y_delta * CONTROL_PARAMS['base_rotation'] * angular_scale,  # Joint 0: Base rotation
+            0.0,  # Shoulder (locked)
+            0.0,  # Elbow (locked)
+            0.0,  # Wrist 1 (locked)
+            0.0,  # Wrist 2 (locked)
+            0.0   # Wrist 3 (locked)
+        ]
+        
+        return joint_velocities
     
     @staticmethod
     def calculate_vertical_z(z_delta, linear_scale):
