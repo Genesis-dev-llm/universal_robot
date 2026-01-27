@@ -1,6 +1,11 @@
 """
-Robot movement mode implementations - Complete Redesign
+Robot movement mode implementations - UR Coordinate System Corrected
 Maps IMU axis values to robot velocity commands
+
+UR BASE FRAME CONVENTION (ISO 9787):
+    X-axis: Left (-) / Right (+)
+    Y-axis: Back (-) / Forward (+)  
+    Z-axis: Down (-) / Up (+)
 
 REDESIGNED MODE SYSTEM:
 - Mode 1: Crane control (TCP translation + base rotation)
@@ -9,6 +14,12 @@ REDESIGNED MODE SYSTEM:
 - Mode 4: Wrist 1 & 2 direct joint control (speedJ)
 - Mode 5: Wrist 3 screwdriver motion (speedJ)
 - Mode 6: Full orientation mimic (handled separately)
+
+FIXES APPLIED:
+- Mode 1: Forward/back now uses Y-axis (was X-axis)
+- Mode 3: Left/right now uses X-axis (was Y-axis)
+- Mode 4: Wrist 1 rotation direction inverted
+- Mode 5: Wrist 3 rotation direction inverted
 """
 
 from config.constants import CONTROL_PARAMS
@@ -29,7 +40,7 @@ class MovementModes:
         MODE 1: Crane Control
         
         Behavior:
-        - Forward/Back tilt → TCP moves forward/back (in TCP frame)
+        - Forward/Back tilt → TCP moves forward/back (UR Y-axis in TCP frame)
         - Left/Right tilt → Base rotates (crane-like swing)
         
         Args:
@@ -40,13 +51,13 @@ class MovementModes:
         
         Returns:
             Tuple: (linear_velocity_tcp_frame, angular_velocity_base_frame)
-            - linear: [vx, 0, 0] in TCP frame (needs transformation in dispatcher)
+            - linear: [0, vy, 0] in TCP frame (needs transformation in dispatcher)
             - angular: [0, 0, rz] in base frame (base rotation)
         """
-        # Forward/back translation (TCP X-axis)
+        # Forward/back translation uses UR Y-axis
         linear_velocity = [
-            x_delta * CONTROL_PARAMS['base_translation'] * linear_scale,
             0.0,
+            x_delta * CONTROL_PARAMS['base_translation'] * linear_scale,  # Y = Forward/Back
             0.0
         ]
         
@@ -65,7 +76,7 @@ class MovementModes:
         MODE 2: Vertical Control
         
         Behavior:
-        - Up/Down tilt → TCP moves vertically
+        - Up/Down tilt → TCP moves vertically (UR Z-axis)
         
         Args:
             z_delta: Vertical input (degrees)
@@ -92,7 +103,7 @@ class MovementModes:
         MODE 3: Lateral Precise Control
         
         Behavior:
-        - Left/Right tilt → TCP moves left/right (in TCP frame)
+        - Left/Right tilt → TCP moves left/right (UR X-axis in TCP frame)
         
         Args:
             y_delta: Left/right input (degrees)
@@ -100,12 +111,13 @@ class MovementModes:
         
         Returns:
             Tuple: (linear_velocity_tcp_frame, angular_velocity)
-            - linear: [0, vy, 0] in TCP frame (needs transformation in dispatcher)
+            - linear: [vx, 0, 0] in TCP frame (needs transformation in dispatcher)
             - angular: [0, 0, 0]
         """
+        # Left/right translation uses UR X-axis
         linear_velocity = [
+            y_delta * CONTROL_PARAMS['tcp_translation'] * linear_scale,  # X = Left/Right
             0.0,
-            y_delta * CONTROL_PARAMS['tcp_translation'] * linear_scale,
             0.0
         ]
         
@@ -137,8 +149,8 @@ class MovementModes:
             0.0,  # Base (locked)
             0.0,  # Shoulder (locked)
             0.0,  # Elbow (locked)
-            rx_delta * CONTROL_PARAMS['wrist_rotation'] * angular_scale,  # Wrist 1 (left/right)
-            rz_delta * CONTROL_PARAMS['wrist_rotation'] * angular_scale,  # Wrist 2 (forward/back)
+            -rx_delta * CONTROL_PARAMS['wrist_rotation'] * angular_scale,  # Wrist 1 (INVERTED)
+            rz_delta * CONTROL_PARAMS['wrist_rotation'] * angular_scale,   # Wrist 2
             0.0   # Wrist 3 (locked)
         ]
         
@@ -168,7 +180,7 @@ class MovementModes:
             0.0,  # Elbow (locked)
             0.0,  # Wrist 1 (locked)
             0.0,  # Wrist 2 (locked)
-            rx_delta * CONTROL_PARAMS['wrist_rotation'] * angular_scale   # Wrist 3 (left/right)
+            -rx_delta * CONTROL_PARAMS['wrist_rotation'] * angular_scale   # Wrist 3 (INVERTED)
         ]
         
         return joint_velocities
