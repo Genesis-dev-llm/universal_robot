@@ -68,7 +68,7 @@ UR_JOINT_ACCELERATION = 6.28    # CHANGED: 1.4 -> 6.28 rad/s² (360°/s²)
 
 CONTROL_PARAMS = {
     'base_translation': 0.010,      # REDUCED: 0.020 -> 0.010 (User requested 50% sensitivity)
-    'base_rotation': 0.06,          
+    'base_rotation': 0.02,          
     'vertical': 0.006,              
     'tcp_translation': 0.0025,      # REDUCED: 0.005 -> 0.0025 (50% sensitivity)
     'tcp_vertical': 0.005,          

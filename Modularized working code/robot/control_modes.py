@@ -221,8 +221,8 @@ class ControlModeDispatcher:
             # ================================================================
             elif mode == 4:
                 joint_velocities = self.movement_modes.calculate_wrist_joint_velocities(
+                    robot_rot['rz'],   # Nod forward/back → Wrist 2
                     robot_rot['rx'],  # Tilt left/right → Wrist 1
-                    robot_rot['rz'],  # Nod forward/back → Wrist 2
                     runtime_config.ANGULAR_SPEED_SCALE
                 )
                 
