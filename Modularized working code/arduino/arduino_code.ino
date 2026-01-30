@@ -23,8 +23,7 @@ unsigned long previousMillis = 0;
 // Home positions for IMU
 float homeRoll = 0, homePitch = 0, homeYaw = 0;
 float homeQI = 0, homeQJ = 0, homeQK = 0, homeQR = 1;
-bool isHomedRotation = false;
-bool isHomedTranslation = false;
+bool isHomed = false;
 
 // Button debouncing for all three buttons
 struct ButtonState {
@@ -40,15 +39,15 @@ ButtonState tcpModeButton = {0, HIGH, HIGH, HIGH};
 
 const unsigned long debounceDelay = 50;
 
-// Button combination states
+// Button combination states (Updated for Unified Tool-Centric Control)
 enum ControlMode {
   IDLE = 0,
-  BASE_ARM_XY = 1,        // Pin 13 only: extend/retract, base rotation
-  VERTICAL_Z = 2,         // Pin 12 only: vertical movement
-  ROBOT_ORIENT = 3,       // Pin 13 + 12: robot pitch/yaw
-  TCP_XY = 4,             // Pin 27 + 13: TCP fine XY positioning
-  TCP_Z = 5,              // Pin 27 + 12: TCP fine Z positioning  
-  TCP_ORIENT = 6          // Pin 27 + 13 + 12: TCP orientation (pitch/yaw/roll)
+  COARSE_TCP_XY = 1,      // Pin 13: Tool-Relative forward coarse/ base rotation (swing)
+  COARSE_TCP_Z = 2,       // Pin 12: Tool-Relative Z (Poke/Pull)
+  GLOBAL_SWING = 3,       // Pin 27: Left/right coarse
+  PRECISION_TCP_XY = 4,   // Pin 13 + 12: Tool-Relative X/Y Fine
+  ACTION_SCREW_GRIP = 5,  // Pin 12 + 27: Screw velocity + Gripper control
+  TOOL_MIMIC = 6          // All pins (13+12+27): Full orientation mimicry
 };
 
 // Quaternion helper functions
@@ -80,12 +79,18 @@ bool debounceButton(ButtonState& button, int pin) {
 }
 
 ControlMode determineControlMode(bool baseArm, bool vertical, bool tcpMode) {
-  if (tcpMode && baseArm && vertical) return TCP_ORIENT;
-  if (tcpMode && baseArm) return TCP_XY;
-  if (tcpMode && vertical) return TCP_Z;
-  if (baseArm && vertical) return ROBOT_ORIENT;
-  if (baseArm) return BASE_ARM_XY;
-  if (vertical) return VERTICAL_Z;
+  // 3-button combos (Highest priority)
+  if (baseArm && vertical && tcpMode) return TOOL_MIMIC;
+  
+  // 2-button combos
+  if (vertical && tcpMode) return ACTION_SCREW_GRIP;
+  if (baseArm && vertical) return PRECISION_TCP_XY;
+  
+  // 1-button modes
+  if (tcpMode) return GLOBAL_SWING;
+  if (baseArm) return COARSE_TCP_XY;
+  if (vertical) return COARSE_TCP_Z;
+  
   return IDLE;
 }
 
@@ -120,7 +125,7 @@ void setup() {
     
     server.begin();
     wifiEnabled = true;
-    Serial.println("# System Ready: 3-Button RTDE Control Mode");
+    Serial.println("# System Ready: 3-Button Unified Tool-Centric Control");
   } else {
     Serial.println("# System Ready: USB Only Mode");
   }
@@ -150,24 +155,24 @@ void loop() {
     if (mode != IDLE) {
       if (myIMU.dataAvailable()) {
         
-        // Homing logic - depends on what type of movement is active
-        if ((mode == BASE_ARM_XY || mode == VERTICAL_Z || mode == ROBOT_ORIENT) && !isHomedTranslation) {
-          // Home for base/robot movements
+        // Homing logic - Updated for Consistent Data Persistence
+        if (!isHomed) {
+          // Home EVERYTHING (Euler & Quaternions) on first button press
+          // This ensures visualizer has orientation data even in button 1/2/3 modes
+          
+          // Euler homing
           homeRoll = myIMU.getRoll() * 180.0 / PI;
           homePitch = myIMU.getPitch() * 180.0 / PI;
           homeYaw = myIMU.getYaw() * 180.0 / PI;
-          isHomedTranslation = true;
-          Serial.println("# Translation/Base movement homed");
-        }
-        
-        if ((mode == TCP_XY || mode == TCP_Z || mode == TCP_ORIENT) && !isHomedRotation) {
-          // Home for TCP movements
+          
+          // Quaternion homing
           homeQI = myIMU.getQuatI();
           homeQJ = myIMU.getQuatJ();
           homeQK = myIMU.getQuatK();
           homeQR = myIMU.getQuatReal();
-          isHomedRotation = true;
-          Serial.println("# TCP/Rotation movement homed");
+          
+          isHomed = true;
+          Serial.println("# System homed (Euler & Quat)");
         }
 
         // Get current IMU data
@@ -182,7 +187,8 @@ void loop() {
         
         // Calculate relative quaternion (for TCP movements)
         float relQI = 0, relQJ = 0, relQK = 0, relQR = 1;
-        if (isHomedRotation) {
+        // Calculate relative quaternion (for Visualizer & Mode 6)
+        if (isHomed) {
           quaternionMultiply(currentQR, currentQI, currentQJ, currentQK,
                             homeQR, -homeQI, -homeQJ, -homeQK,
                             relQR, relQI, relQJ, relQK);
@@ -190,7 +196,8 @@ void loop() {
         
         // Calculate relative Euler angles (for base movements)
         float relRoll = 0, relPitch = 0, relYaw = 0;
-        if (isHomedTranslation) {
+        // Calculate relative Euler angles (for Modes 1-5)
+        if (isHomed) {
           relRoll = currentRoll - homeRoll;
           relPitch = currentPitch - homePitch;
           relYaw = currentYaw - homeYaw;
@@ -210,8 +217,7 @@ void loop() {
       }
     } else {
       // No buttons pressed - reset homing for next activation
-      isHomedRotation = false;
-      isHomedTranslation = false;
+      isHomed = false;
     }
   }
 }
