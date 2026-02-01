@@ -39,15 +39,14 @@ ButtonState tcpModeButton = {0, HIGH, HIGH, HIGH};
 
 const unsigned long debounceDelay = 50;
 
-// Button combination states (Updated for Unified Tool-Centric Control)
 enum ControlMode {
   IDLE = 0,
-  COARSE_TCP_XY = 1,      // Pin 13: Tool-Relative forward coarse/ base rotation (swing)
-  COARSE_TCP_Z = 2,       // Pin 12: Tool-Relative Z (Poke/Pull)
-  GLOBAL_SWING = 3,       // Pin 27: Left/right coarse
-  PRECISION_TCP_XY = 4,   // Pin 13 + 12: Tool-Relative X/Y Fine
-  ACTION_SCREW_GRIP = 5,  // Pin 12 + 27: Screw velocity + Gripper control
-  TOOL_MIMIC = 6          // All pins (13+12+27): Full orientation mimicry
+  COARSE_TCP_XY = 1,      // Pin 13: Mode 1
+  COARSE_TCP_Z = 2,       // Pin 12: Mode 2
+  GLOBAL_SWING = 3,       // Pin 27: Mode 3
+  PRECISION_TCP_XY = 4,   // Pin 13 + 12: Mode 4
+  ACTION_SCREW_GRIP = 5,  // Pin 12 + 27: Mode 5
+  TOOL_MIMIC = 6          // All pins (13+12+27): Mode 6
 };
 
 // Quaternion helper functions
