@@ -49,6 +49,13 @@ class ConfigManager:
             'min_scale': 0.1,
             'max_scale': 2.0,
             'step': 0.1
+        },
+        'gripper': {
+            'enabled': True,
+            'default_speed': 255,
+            'default_force': 150,
+            'deadzone': 3,
+            'update_interval': 0.05
         }
     }
     
@@ -139,6 +146,11 @@ class RuntimeConfig:
         self.MIN_SCALE = config_manager.get('speed_scaling', 'min_scale', 0.1)
         self.MAX_SCALE = config_manager.get('speed_scaling', 'max_scale', 2.0)
         self.STEP_SCALE = config_manager.get('speed_scaling', 'step', 0.1)
+        
+        # Gripper Control
+        self.GRIPPER_ENABLED = config_manager.get('gripper', 'enabled', True)
+        self.GRIPPER_SPEED = config_manager.get('gripper', 'default_speed', 255)
+        self.GRIPPER_FORCE = config_manager.get('gripper', 'default_force', 150)
         
         # Clamp initial values to ensure they respect safety minimum
         self.LINEAR_SPEED_SCALE = max(self.MIN_SCALE, min(self.MAX_SCALE, self.LINEAR_SPEED_SCALE))

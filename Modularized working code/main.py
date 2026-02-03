@@ -1,5 +1,5 @@
 """
-Universal Robot RTDE Control with Wearable IMU
+Universal Robot RTDE Control with Wearable IMU + Flex Sensor Gripper
 Main Application Entry Point - Redesigned Mode System
 
 CHANGES:
@@ -7,6 +7,7 @@ CHANGES:
 - Cube only rotates in orientation modes (4, 5, 6)
 - Terminal spam eliminated (mode changes only)
 - FIXED: Proper Robot→OpenGL coordinate frame conversion
+- ADDED: Flex sensor gripper integration
 
 Author: Professional Refactored Version
 Date: January 2025
@@ -201,10 +202,25 @@ class StatusBuilder:
         # IMU connection status
         imu_status = "Connected" if imu_connected else "DISCONNECTED"
         
+        # Build status lines
         status_lines = [
             f"Mode: {mode_name} | {status.get('robot_status', 'N/A')} | IMU: {imu_status}",
             f"Speed: {status.get('target_velocity', 0.0) * 100:.0f}% | Lin Scale: {runtime_config.LINEAR_SPEED_SCALE:.1f}x | Ang Scale: {runtime_config.ANGULAR_SPEED_SCALE:.1f}x"
         ]
+        
+        # Gripper status line
+        gripper_status = status.get('gripper_status', 'DISABLED')
+        gripper_pos = status.get('gripper_position', 0)
+        gripper_speed = status.get('gripper_speed', 0)
+        gripper_force = status.get('gripper_force', 0)
+        
+        if gripper_status != "DISABLED":
+            gripper_enabled_str = "ON" if runtime_config.GRIPPER_ENABLED else "OFF"
+            status_lines.append(
+                f"Gripper: {gripper_status} ({gripper_enabled_str}) | Pos: {gripper_pos} | Spd: {gripper_speed} | Force: {gripper_force}"
+            )
+        else:
+            status_lines.append("Gripper: DISABLED")
         
         if status.get('connection_lost'):
             status_lines.append(f"WARNING: Connection Lost - Reconnect: {status.get('reconnect_attempts', 0)}/5")
@@ -238,7 +254,7 @@ def print_startup_info(config_manager, imu_calibration, imu_interface, runtime_c
     print()
     
     print("="*70)
-    print("UNIVERSAL ROBOT RTDE + IMU CONTROL SYSTEM")
+    print("UNIVERSAL ROBOT RTDE + IMU + GRIPPER CONTROL SYSTEM")
     print("="*70)
     
     # IMU connection status
@@ -250,6 +266,7 @@ def print_startup_info(config_manager, imu_calibration, imu_interface, runtime_c
     print(f"Robot IP: {UR_ROBOT_IP}")
     print(f"Robot Control: {'ENABLED' if UR_ENABLED else 'DISABLED'}")
     print(f"Simulation Mode: {'ON' if UR_SIMULATE else 'OFF (REAL ROBOT)'}")
+    print(f"Gripper Control: {'ENABLED' if runtime_config.GRIPPER_ENABLED else 'DISABLED'}")
     print(f"Remapped Modes: {'ENABLED' if runtime_config.ENABLE_REMAPPED_MODES else 'DISABLED (SAFETY)'}")
     print("\nControl Modes (Redesigned):")
     for mode_num, mode_name in CONTROL_MODES.items():
@@ -258,7 +275,9 @@ def print_startup_info(config_manager, imu_calibration, imu_interface, runtime_c
         print(f"  Mode {mode_num}: {mode_name}")
     print("\nControls:")
     print("  [TAB] Switch View | [R] Reset | [U] Robot Power | [S] Emergency Stop")
-    print("  [↑↓] Linear Speed | [←→] Angular Speed | [C] Save Config")
+    print("  [↑↓] Linear Speed | [←→] Angular Speed")
+    print("  [Shift+G] Gripper Toggle | [O] Open | [C] Close")
+    print("  [[ ]] Gripper Speed | [; '] Gripper Force")
     print("  [Shift+C] Calibrate IMU | [ESC] Quit")
     print("="*70 + "\n")
 
@@ -285,7 +304,7 @@ def main():
         print("Make sure you have OpenGL support installed.")
         return
     
-    pygame.display.set_caption("UR Robot RTDE + IMU Control")
+    pygame.display.set_caption("UR Robot RTDE + IMU + Gripper Control")
     glEnable(GL_DEPTH_TEST)
     glClearColor(0.1, 0.1, 0.15, 1.0)
     
@@ -299,7 +318,7 @@ def main():
     scene_renderer = SceneRenderer()
     gui_overlay = GUIOverlay()
     
-    # Initialize RTDE Controller
+    # Initialize RTDE Controller (includes gripper initialization)
     print("Initializing RTDE controller...")
     rtde_controller = RTDEController(UR_ROBOT_IP, UR_ENABLED, UR_SIMULATE, config_manager)
     
@@ -380,7 +399,7 @@ def main():
                     # Mode change message handled in control_dispatcher now
                     vis_state.last_mode = imu_data['mode']
                 
-                # Execute robot control
+                # Execute robot control (now includes gripper via flex sensor)
                 if rtde_controller.enabled:
                     control_dispatcher.execute_mode(imu_data['mode'], imu_data, runtime_config)
             
@@ -454,9 +473,11 @@ def main():
         # Save final speed settings
         config_manager.set(runtime_config.LINEAR_SPEED_SCALE, 'speed_scaling', 'linear_scale')
         config_manager.set(runtime_config.ANGULAR_SPEED_SCALE, 'speed_scaling', 'angular_scale')
+        config_manager.set(runtime_config.GRIPPER_SPEED, 'gripper', 'default_speed')
+        config_manager.set(runtime_config.GRIPPER_FORCE, 'gripper', 'default_force')
         config_manager.save_config()
         
-        rtde_controller.close()
+        rtde_controller.close()  # This now also closes gripper
         imu_interface.close()
         pygame.quit()
         
@@ -467,6 +488,12 @@ def main():
         print(f"  Successful: {stats['successful']}")
         print(f"  Failed: {stats['failed']}")
         print(f"  Success rate: {stats['success_rate']:.1f}%")
+        
+        # Gripper statistics
+        if rtde_controller.gripper:
+            gripper_stats = rtde_controller.gripper.get_status()
+            print(f"\n  Gripper commands: {gripper_stats['total_commands']}")
+            print(f"  Gripper success rate: {gripper_stats['success_rate']:.1f}%")
 
 #==============================================================================
 # PROGRAM ENTRY POINT

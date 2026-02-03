@@ -9,12 +9,9 @@ MODE 1 PRIORITY SYSTEM:
   * If forward/back tilt stronger: Use speedL for TCP translation
 - 5° deadzone prevents accidental dual triggering
 
-FIXES:
-- Modes 4 & 5 now use speedJ (direct joint control)
-- Fixed axis mappings for wrist control
-- Mode 1 uses conditional command type based on input priority
-- TCP-to-Base frame transformation for intuitive control
-- Fixed terminal spam (only logs mode changes)
+GRIPPER INTEGRATION:
+- Modes 1-3: Continuous flex tracking (hand motion → gripper)
+- Modes 4-6: Gripper locked (orientation control, no flex tracking)
 """
 
 import numpy as np
@@ -32,7 +29,7 @@ from core.coordinate_frames import frame_transform
 class ControlModeDispatcher:
     """
     Dispatches control commands based on active mode
-    Handles frame transformations and RTDE command generation
+    Handles frame transformations, RTDE commands, and gripper control
     """
     
     def __init__(self, rtde_controller):
@@ -40,7 +37,7 @@ class ControlModeDispatcher:
         Initialize dispatcher
         
         Args:
-            rtde_controller: RTDEController instance
+            rtde_controller: RTDEController instance (includes gripper)
         """
         self.rtde_controller = rtde_controller
         self.movement_modes = MovementModes()
@@ -70,7 +67,7 @@ class ControlModeDispatcher:
         
         Args:
             mode: Current mode ID
-            imu_data: Dictionary with parsed IMU data
+            imu_data: Dictionary with parsed IMU data (includes 'flex' key)
             runtime_config: RuntimeConfig instance
         """
         # CRITICAL: Mode change detection at TOP to prevent spam
@@ -86,6 +83,28 @@ class ControlModeDispatcher:
             self.mimic_ref_robot_pose = None
             
             self.last_mode = mode
+        
+        # ====================================================================
+        # GRIPPER CONTROL LOGIC
+        # ====================================================================
+        flex_percent = imu_data.get('flex', 0)  # Get flex sensor value (0-100)
+        
+        # Determine if gripper should track flex based on mode
+        gripper_enabled = runtime_config.GRIPPER_ENABLED
+        gripper = self.rtde_controller.gripper
+        
+        if gripper and gripper.is_activated() and gripper_enabled:
+            # Modes 1-3: Continuous flex tracking (movement modes)
+            if mode in [1, 2, 3]:
+                gripper.update_position(flex_percent)
+            
+            # Modes 4-6: Gripper locked (orientation modes)
+            # No flex tracking - gripper holds last position
+            # Mode 0 (IDLE): No tracking either
+        
+        # ====================================================================
+        # ROBOT CONTROL LOGIC
+        # ====================================================================
         
         # Handle IDLE mode
         if mode == 0:

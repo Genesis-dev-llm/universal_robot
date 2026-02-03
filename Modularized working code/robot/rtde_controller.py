@@ -3,6 +3,7 @@ RTDE Robot Controller - Linear Smoothing Update
 CHANGES:
 - Changed from exponential to linear smoothing
 - Added speedJ support for direct joint control (Modes 4 & 5)
+- Integrated Hand-E gripper controller
 """
 
 import time
@@ -13,11 +14,12 @@ from collections import deque
 from core.error_handler import RobotError
 from core.math_utils import clamp_position, rotation_vector_add, calculate_angular_velocity
 from robot.safety_checker import SafetyChecker
+from robot.gripper_controller import GripperController
 from config.constants import (
     UR_BASE_POSITION, UR_BASE_ORIENTATION,
     UR_MAX_VELOCITY, UR_MAX_ACCELERATION,
     UR_JOINT_VELOCITY, UR_JOINT_ACCELERATION,
-    RTDE_MAX_FREQUENCY
+    RTDE_MAX_FREQUENCY, GRIPPER_ENABLED
 )
 
 # Try to import RTDE
@@ -32,6 +34,7 @@ except ImportError:
 class RTDEController:
     """
     Universal Robot RTDE control interface with comprehensive safety
+    Now includes integrated Hand-E gripper control
     """
     
     def __init__(self, robot_ip, enabled=False, simulate=True, config_mgr=None):
@@ -56,6 +59,10 @@ class RTDEController:
         # Safety checker
         self.safety_checker = SafetyChecker(log_file=None)
         
+        # Gripper controller
+        self.gripper = None
+        self.gripper_enabled = GRIPPER_ENABLED and config_mgr.get('gripper', 'enabled', True) if config_mgr else GRIPPER_ENABLED
+        
         # Control state
         self.command_queue = deque(maxlen=100)
         self.blend_mode = True   # Default to smooth blending (easier)
@@ -64,7 +71,7 @@ class RTDEController:
         # Command Thresholding (to prevent jittery updates)
         self.last_sent_pose = None
         self.last_sent_velocity = None
-        self.last_sent_joint_velocity = None  # NEW: For speedJ commands
+        self.last_sent_joint_velocity = None
         self.POSE_DELTA_THRESHOLD = 0.0005  # 0.5mm
         self.ORIENT_DELTA_THRESHOLD = 0.005 # ~0.3 degrees
         self.VEL_DELTA_THRESHOLD = 0.001    # 1mm/s or 0.001 rad/s
@@ -112,7 +119,8 @@ class RTDEController:
             self.log_file = open(log_filename, "w")
             self.log_file.write(f"# RTDE Control Log - {datetime.now()}\n")
             self.log_file.write(f"# Mode: {'SIMULATE' if simulate else 'REAL'}\n")
-            self.log_file.write(f"# Robot IP: {robot_ip}\n\n")
+            self.log_file.write(f"# Robot IP: {robot_ip}\n")
+            self.log_file.write(f"# Gripper: {'ENABLED' if self.gripper_enabled else 'DISABLED'}\n\n")
             print(f"Logging to: {log_filename}")
             
             # Update safety checker with log file
@@ -125,9 +133,9 @@ class RTDEController:
             self.connect()
     
     def connect(self):
-        """Connect to UR robot via RTDE"""
+        """Connect to UR robot via RTDE and gripper"""
         try:
-            # Attempt connection with shorter timeout for responsiveness
+            # Attempt RTDE connection
             print(f"Connecting to UR robot at {self.robot_ip}...")
             self.rtde_c = rtde_control.RTDEControlInterface(self.robot_ip)
             self.rtde_r = rtde_receive.RTDEReceiveInterface(self.robot_ip)
@@ -148,16 +156,21 @@ class RTDEController:
             # Reset connection tracking
             self.connection_lost = False
             self.reconnect_attempts = 0
+            
+            # Initialize gripper if enabled
+            if self.gripper_enabled:
+                self._initialize_gripper()
+            
             return True
             
-        except RuntimeError as e: # rtde throws RuntimeError on timeout
+        except RuntimeError as e:
             print(f"\n[WARNING] Could not connect to robot at {self.robot_ip}")
             print(f"Reason: {e}")
             print(">> FALLING BACK TO SIMULATION MODE (Cube Visualization Only) <<\n")
             
             # Fallback Logic
             self.simulate = True
-            self.enabled = False # Soft disable
+            self.enabled = False
             self.rtde_c = None
             self.rtde_r = None
             
@@ -172,6 +185,27 @@ class RTDEController:
             self.rtde_r = None
             self.connection_lost = True
             return False
+    
+    def _initialize_gripper(self):
+        """Initialize gripper controller"""
+        try:
+            print("Initializing Hand-E gripper...")
+            self.gripper = GripperController(self.robot_ip, self.config_mgr, self.log_file)
+            
+            if self.gripper.connect():
+                if self.gripper.activate():
+                    self.gripper.start_worker_thread()
+                    print("✓ Gripper ready")
+                else:
+                    print("✗ Gripper activation failed")
+                    self.gripper = None
+            else:
+                print("✗ Gripper connection failed - continuing without gripper")
+                self.gripper = None
+                
+        except Exception as e:
+            print(f"✗ Gripper initialization error: {e}")
+            self.gripper = None
     
     def attempt_reconnect(self):
         """Attempt reconnection after connection loss"""
@@ -416,13 +450,22 @@ class RTDEController:
             return False
     
     def emergency_stop(self):
-        """Emergency stop robot"""
+        """Emergency stop robot and open gripper"""
         if self.enabled and self.rtde_c:
             try:
                 self.rtde_c.stopL(10.0)
                 print("EMERGENCY STOP EXECUTED")
             except Exception as e:
                 print(f"Emergency stop error: {e}")
+        
+        # Open gripper on emergency stop
+        if self.gripper and self.gripper.is_activated():
+            try:
+                self.gripper.open_gripper()
+                print("Gripper opened (emergency)")
+            except:
+                pass
+        
         self.log_command("# EMERGENCY STOP")
     
     def reset_to_home(self):
@@ -439,7 +482,7 @@ class RTDEController:
     
     def get_status_display(self):
         """Get formatted status for display"""
-        return {
+        status_dict = {
             'robot_status': self.robot_status_text,
             'tcp_pose': self.current_tcp_pose,
             'joint_angles': [math.degrees(j) for j in self.last_joint_positions],
@@ -450,6 +493,21 @@ class RTDEController:
             'total_commands': self.total_commands_sent,
             'success_rate': (self.successful_commands / self.total_commands_sent * 100) if self.total_commands_sent > 0 else 0
         }
+        
+        # Add gripper status
+        if self.gripper:
+            gripper_status = self.gripper.get_status()
+            status_dict['gripper_status'] = gripper_status['status']
+            status_dict['gripper_position'] = gripper_status['position']
+            status_dict['gripper_speed'] = gripper_status['speed']
+            status_dict['gripper_force'] = gripper_status['force']
+        else:
+            status_dict['gripper_status'] = "DISABLED"
+            status_dict['gripper_position'] = 0
+            status_dict['gripper_speed'] = 0
+            status_dict['gripper_force'] = 0
+        
+        return status_dict
     
     def move_speed(self, linear_velocity, angular_velocity, acceleration=0.5, mode_name=None):
         """
@@ -486,8 +544,6 @@ class RTDEController:
         self.last_sent_velocity = velocity_vector[:]
         self.last_command_time = current_time
         self.total_commands_sent += 1
-        
-        # Only log mode changes, not every command (handled in dispatcher now)
         
         # Log to file occasionally (not terminal)
         if self.total_commands_sent % 50 == 0:
@@ -678,6 +734,14 @@ class RTDEController:
     
     def close(self):
         """Close connections and log file"""
+        # Close gripper first
+        if self.gripper:
+            try:
+                self.gripper.close()
+            except:
+                pass
+        
+        # Close RTDE connections
         if self.rtde_c:
             try:
                 self.rtde_c.disconnect()
@@ -688,6 +752,8 @@ class RTDEController:
                 self.rtde_r.disconnect()
             except:
                 pass
+        
+        # Close log file
         if self.log_file and not self.log_file.closed:
             stats = self.get_statistics()
             self.log_file.write(f"\n# Session Statistics:\n")
@@ -695,5 +761,12 @@ class RTDEController:
             self.log_file.write(f"# Successful: {stats['successful']}\n")
             self.log_file.write(f"# Failed: {stats['failed']}\n")
             self.log_file.write(f"# Success rate: {stats['success_rate']:.1f}%\n")
+            
+            if self.gripper:
+                gripper_stats = self.gripper.get_status()
+                self.log_file.write(f"\n# Gripper Statistics:\n")
+                self.log_file.write(f"# Total commands: {gripper_stats['total_commands']}\n")
+                self.log_file.write(f"# Success rate: {gripper_stats['success_rate']:.1f}%\n")
+            
             self.log_file.close()
             print(f"Session stats: {stats['total']} commands, {stats['success_rate']:.1f}% success rate")

@@ -1,6 +1,8 @@
 """
 Keyboard event handling
 Processes user input and keyboard shortcuts
+
+UPDATED: Added gripper control hotkeys
 """
 
 import pygame
@@ -9,6 +11,7 @@ from pygame.locals import *
 class EventHandler:
     """
     Handles keyboard events and user input
+    Now includes gripper controls
     """
     
     def __init__(self, config_manager, runtime_config, imu_calibration, rtde_controller, vis_state=None, control_dispatcher=None):
@@ -100,7 +103,9 @@ class EventHandler:
                     self.vis_state.visualizer_mode = 'CUBE'
                 print(f"Visualizer Mode: {self.vis_state.visualizer_mode}")
         
-        # Speed Control Keys
+        # ====================================================================
+        # ROBOT SPEED CONTROL KEYS
+        # ====================================================================
         elif key == pygame.K_UP:
             self.runtime_config.LINEAR_SPEED_SCALE = min(
                 self.runtime_config.MAX_SCALE, 
@@ -133,11 +138,77 @@ class EventHandler:
             self.config_manager.set(self.runtime_config.ANGULAR_SPEED_SCALE, 
                                    'speed_scaling', 'angular_scale')
         
-        elif key == pygame.K_c:
-            # Shift+C to start calibration
+        # ====================================================================
+        # GRIPPER CONTROL KEYS
+        # ====================================================================
+        elif key == pygame.K_g:
+            # Toggle gripper enable/disable (Safety Interlock: Shift + G)
             keys_pressed = pygame.key.get_mods()
             if keys_pressed & pygame.KMOD_SHIFT:
-                self.imu_calibration.start_calibration_wizard()
+                self.runtime_config.GRIPPER_ENABLED = not self.runtime_config.GRIPPER_ENABLED
+                status = "ENABLED" if self.runtime_config.GRIPPER_ENABLED else "DISABLED"
+                print(f"Gripper control: {status}")
+                self.config_manager.set(self.runtime_config.GRIPPER_ENABLED, 
+                                       'gripper', 'enabled')
+            else:
+                print("[SAFETY] Gripper toggle requires SHIFT + G")
+        
+        elif key == pygame.K_o:
+            # Manual open gripper
+            if self.rtde_controller.gripper:
+                self.rtde_controller.gripper.open_gripper()
+            else:
+                print("Gripper not available")
+        
+        elif key == pygame.K_c and not (pygame.key.get_mods() & pygame.KMOD_SHIFT):
+            # Manual close gripper (only if NOT Shift+C which is calibration)
+            if self.rtde_controller.gripper:
+                self.rtde_controller.gripper.close_gripper()
+            else:
+                print("Gripper not available")
+        
+        elif key == pygame.K_LEFTBRACKET:
+            # Decrease gripper speed
+            if self.rtde_controller.gripper:
+                new_speed = max(50, self.runtime_config.GRIPPER_SPEED - 10)
+                self.runtime_config.GRIPPER_SPEED = new_speed
+                self.rtde_controller.gripper.set_speed(new_speed)
+            else:
+                print("Gripper not available")
+        
+        elif key == pygame.K_RIGHTBRACKET:
+            # Increase gripper speed
+            if self.rtde_controller.gripper:
+                new_speed = min(255, self.runtime_config.GRIPPER_SPEED + 10)
+                self.runtime_config.GRIPPER_SPEED = new_speed
+                self.rtde_controller.gripper.set_speed(new_speed)
+            else:
+                print("Gripper not available")
+        
+        elif key == pygame.K_SEMICOLON:
+            # Decrease gripper force
+            if self.rtde_controller.gripper:
+                new_force = max(20, self.runtime_config.GRIPPER_FORCE - 10)
+                self.runtime_config.GRIPPER_FORCE = new_force
+                self.rtde_controller.gripper.set_force(new_force)
+            else:
+                print("Gripper not available")
+        
+        elif key == pygame.K_QUOTE:
+            # Increase gripper force
+            if self.rtde_controller.gripper:
+                new_force = min(255, self.runtime_config.GRIPPER_FORCE + 10)
+                self.runtime_config.GRIPPER_FORCE = new_force
+                self.rtde_controller.gripper.set_force(new_force)
+            else:
+                print("Gripper not available")
+        
+        # ====================================================================
+        # IMU CALIBRATION KEYS
+        # ====================================================================
+        elif key == pygame.K_c and (pygame.key.get_mods() & pygame.KMOD_SHIFT):
+            # Shift+C to start calibration
+            self.imu_calibration.start_calibration_wizard()
         
         elif key == pygame.K_SPACE:
             # Only used for advancing calibration steps
@@ -151,4 +222,3 @@ class EventHandler:
                         self.control_dispatcher.reset_mimic_references()
         
         return True
-    

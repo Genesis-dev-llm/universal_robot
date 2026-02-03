@@ -1,6 +1,9 @@
 """
 IMU data parsing and validation
 Parses ESP32 data packets into usable format
+
+UPDATED: Now handles 9-value CSV format including flex sensor data
+Format: relQI,relQJ,relQK,relQR,relRoll,relPitch,relYaw,mode,flex
 """
 
 import numpy as np
@@ -10,6 +13,7 @@ from core.error_handler import RobotError
 class IMUDataParser:
     """
     Parses and validates IMU data packets from ESP32
+    Now includes flex sensor data (9th value)
     """
     
     @staticmethod
@@ -17,7 +21,7 @@ class IMUDataParser:
         """
         Parse IMU data line into structured format
         
-        Expected format: relQI,relQJ,relQK,relQR,relRoll,relPitch,relYaw,mode
+        Expected format: relQI,relQJ,relQK,relQR,relRoll,relPitch,relYaw,mode,flex
         
         Args:
             line: Raw data string from IMU
@@ -28,7 +32,8 @@ class IMUDataParser:
             {
                 'quaternion': [qi, qj, qk, qr],
                 'euler': [roll, pitch, yaw],
-                'mode': int
+                'mode': int,
+                'flex': int (0-100 percentage)
             }
         """
         # Skip comment lines and empty lines
@@ -37,16 +42,17 @@ class IMUDataParser:
         
         try:
             parts = line.split(',')
-            if len(parts) != 8:  # Changed from 9 (removed flex)
+            if len(parts) != 9:  # CHANGED: 8 -> 9 (added flex)
                 if log_file:
                     RobotError.log_error(log_file, 'E502',
-                        details=f"Expected 8 values, got {len(parts)}",
+                        details=f"Expected 9 values, got {len(parts)}",
                         context=f"Line: {line}")
                 return None
             
             # Parse floats and ints
             float_parts = [float(p) for p in parts[:7]]
             mode_part = int(parts[7])
+            flex_part = int(parts[8])  # NEW: 9th value is flex sensor percentage
             
             # Validate finite values
             if not all(math.isfinite(x) for x in float_parts):
@@ -60,10 +66,20 @@ class IMUDataParser:
             rel_qi, rel_qj, rel_qk, rel_qr = float_parts[:4]
             rel_roll, rel_pitch, rel_yaw = float_parts[4:7]
             
+            # Validate flex sensor range (0-100)
+            if not (0 <= flex_part <= 100):
+                if log_file:
+                    RobotError.log_error(log_file, 'E604',
+                        details=f"Flex value out of range: {flex_part}",
+                        context=f"Expected 0-100, got {flex_part}")
+                # Clamp to valid range instead of rejecting
+                flex_part = max(0, min(100, flex_part))
+            
             return {
                 'quaternion': np.array([rel_qi, rel_qj, rel_qk, rel_qr]),
                 'euler': np.array([rel_roll, rel_pitch, rel_yaw]),
-                'mode': mode_part
+                'mode': mode_part,
+                'flex': flex_part  # NEW: flex sensor percentage
             }
             
         except (ValueError, IndexError) as e:
@@ -113,3 +129,23 @@ class IMUDataParser:
         
         # Check reasonable ranges (±180 degrees)
         return all(abs(x) < 360.0 for x in euler)
+    
+    @staticmethod
+    def validate_flex(flex_value):
+        """
+        Validate flex sensor data
+        
+        Args:
+            flex_value: Flex sensor percentage (0-100)
+        
+        Returns:
+            True if valid, False otherwise
+        """
+        if not isinstance(flex_value, (int, float)):
+            return False
+        
+        if not math.isfinite(flex_value):
+            return False
+        
+        # Check range 0-100
+        return 0 <= flex_value <= 100

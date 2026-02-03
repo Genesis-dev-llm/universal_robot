@@ -1,6 +1,8 @@
 """
 GUI overlay rendering
 Status text and speed indicators
+
+UPDATED: Added gripper status display
 """
 
 import pygame
@@ -9,6 +11,7 @@ from OpenGL.GL import *
 class GUIOverlay:
     """
     Renders 2D GUI elements over 3D scene
+    Now includes gripper status
     """
     
     def __init__(self, font_name='monospace', font_size=14):
@@ -43,8 +46,6 @@ class GUIOverlay:
         
         glDisable(GL_BLEND)
     
-
-    
     def draw_status_text(self, status_lines, display_size):
         """
         Draw status text lines
@@ -57,10 +58,12 @@ class GUIOverlay:
         
         for i, line in enumerate(status_lines):
             # Color coding based on content
-            if "ERROR" in line or "NOT READY" in line or "BLOCKED" in line or "WARNING" in line:
+            if "ERROR" in line or "NOT READY" in line or "BLOCKED" in line or "WARNING" in line or "DISCONNECTED" in line:
                 color = (255, 0, 0)  # Red
-            elif "READY" in line:
+            elif "READY" in line or "Connected" in line:
                 color = (0, 255, 0)  # Green
+            elif "DISABLED" in line:
+                color = (200, 200, 0)  # Yellow
             else:
                 color = (255, 255, 255)  # White
             

@@ -1,6 +1,8 @@
 """
 Robot safety validation system
 All safety checks for robot operations
+
+UPDATED: Added gripper safety validations
 """
 
 import math
@@ -9,12 +11,15 @@ from core.math_utils import is_valid_pose
 from config.constants import (
     UR_JOINT_LIMITS, JOINT_SAFETY_MARGIN,
     WRIST_SINGULARITY_THRESHOLD, SHOULDER_SINGULARITY_THRESHOLD,
-    ELBOW_SINGULARITY_THRESHOLD, ROBOT_MODE_NAMES, SAFETY_MODE_NAMES
+    ELBOW_SINGULARITY_THRESHOLD, ROBOT_MODE_NAMES, SAFETY_MODE_NAMES,
+    GRIPPER_MIN_POSITION, GRIPPER_MAX_POSITION, GRIPPER_MIN_SPEED,
+    GRIPPER_MAX_SPEED, GRIPPER_MIN_FORCE, GRIPPER_MAX_FORCE
 )
 
 class SafetyChecker:
     """
     Validates robot state and motion safety
+    Now includes gripper safety checks
     """
     
     def __init__(self, rtde_receive=None, log_file=None):
@@ -194,3 +199,113 @@ class SafetyChecker:
             if self.log_file:
                 RobotError.log_error(self.log_file, 'E302', str(e), "Singularity check error")
             return False, f"Singularity check error: {str(e)}"
+    
+    # ========================================================================
+    # GRIPPER SAFETY VALIDATIONS
+    # ========================================================================
+    
+    def validate_gripper_position(self, position):
+        """
+        Validate gripper position command
+        
+        Args:
+            position: Gripper position (0-255)
+        
+        Returns:
+            Tuple (is_valid: bool, message: str)
+        """
+        if not isinstance(position, (int, float)):
+            return False, RobotError.format_error('E605',
+                details="Position must be numeric",
+                context=f"Received: {type(position)}")
+        
+        if not math.isfinite(position):
+            return False, RobotError.format_error('E605',
+                details="Position is NaN or Inf",
+                context=f"Value: {position}")
+        
+        if not (GRIPPER_MIN_POSITION <= position <= GRIPPER_MAX_POSITION):
+            return False, RobotError.format_error('E605',
+                details=f"Position out of range: {position}",
+                context=f"Valid range: {GRIPPER_MIN_POSITION}-{GRIPPER_MAX_POSITION}")
+        
+        return True, "OK"
+    
+    def validate_gripper_speed(self, speed):
+        """
+        Validate gripper speed parameter
+        
+        Args:
+            speed: Gripper speed (0-255)
+        
+        Returns:
+            Tuple (is_valid: bool, message: str)
+        """
+        if not isinstance(speed, (int, float)):
+            return False, RobotError.format_error('E605',
+                details="Speed must be numeric",
+                context=f"Received: {type(speed)}")
+        
+        if not math.isfinite(speed):
+            return False, RobotError.format_error('E605',
+                details="Speed is NaN or Inf",
+                context=f"Value: {speed}")
+        
+        if not (GRIPPER_MIN_SPEED <= speed <= GRIPPER_MAX_SPEED):
+            return False, RobotError.format_error('E605',
+                details=f"Speed out of range: {speed}",
+                context=f"Valid range: {GRIPPER_MIN_SPEED}-{GRIPPER_MAX_SPEED}")
+        
+        return True, "OK"
+    
+    def validate_gripper_force(self, force):
+        """
+        Validate gripper force parameter
+        
+        Args:
+            force: Gripper force (0-255)
+        
+        Returns:
+            Tuple (is_valid: bool, message: str)
+        """
+        if not isinstance(force, (int, float)):
+            return False, RobotError.format_error('E605',
+                details="Force must be numeric",
+                context=f"Received: {type(force)}")
+        
+        if not math.isfinite(force):
+            return False, RobotError.format_error('E605',
+                details="Force is NaN or Inf",
+                context=f"Value: {force}")
+        
+        if not (GRIPPER_MIN_FORCE <= force <= GRIPPER_MAX_FORCE):
+            return False, RobotError.format_error('E605',
+                details=f"Force out of range: {force}",
+                context=f"Valid range: {GRIPPER_MIN_FORCE}-{GRIPPER_MAX_FORCE}")
+        
+        return True, "OK"
+    
+    def validate_gripper_state(self, gripper_controller):
+        """
+        Check if gripper is ready to accept commands
+        
+        Args:
+            gripper_controller: GripperController instance
+        
+        Returns:
+            Tuple (is_ready: bool, message: str)
+        """
+        if not gripper_controller:
+            return False, "Gripper controller not initialized"
+        
+        if not gripper_controller.is_connected():
+            return False, RobotError.format_error('E601',
+                details="Gripper not connected",
+                context="Check network connection")
+        
+        if not gripper_controller.is_activated():
+            return False, RobotError.format_error('E602',
+                details="Gripper not activated",
+                context="Activation sequence required")
+        
+        return True, "OK"

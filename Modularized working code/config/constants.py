@@ -8,6 +8,10 @@ OPTIMIZED FOR UR5e:
 - UR5e max acceleration: 5.0 m/s² (much faster!)
 - Updated workspace limits for UR5e
 - Faster control parameters taking advantage of UR5e speed
+
+ADDED: Hand-E Gripper Integration
+- Gripper control via flex sensor input
+- Socket communication on port 63352
 """
 
 import math
@@ -61,6 +65,34 @@ UR_MAX_VELOCITY = 1.0           # CHANGED: 0.25 -> 1.0 m/s (UR5e max speed!)
 UR_MAX_ACCELERATION = 5.0       # CHANGED: 1.2 -> 5.0 m/s² (UR5e max accel!)
 UR_JOINT_VELOCITY = 3.14        # CHANGED: 1.05 -> 3.14 rad/s (180°/s)
 UR_JOINT_ACCELERATION = 6.28    # CHANGED: 1.4 -> 6.28 rad/s² (360°/s²)
+
+#==============================================================================
+# HAND-E GRIPPER SETTINGS
+#==============================================================================
+
+# Connection parameters
+GRIPPER_ENABLED = True           # Enable gripper control
+GRIPPER_PORT = 63352             # Socket port for Hand-E gripper
+GRIPPER_TIMEOUT = 2.0            # Socket timeout in seconds
+GRIPPER_RECONNECT_ATTEMPTS = 3   # Max reconnection attempts
+GRIPPER_RECONNECT_COOLDOWN = 2.0 # Seconds between reconnect attempts
+
+# Control parameters
+GRIPPER_MIN_POSITION = 0         # Fully open (0-255 range)
+GRIPPER_MAX_POSITION = 255       # Fully closed (0-255 range)
+GRIPPER_DEFAULT_SPEED = 255      # Default speed (0-255)
+GRIPPER_DEFAULT_FORCE = 150      # Default force (0-255)
+GRIPPER_MIN_SPEED = 50           # Minimum allowed speed
+GRIPPER_MAX_SPEED = 255          # Maximum allowed speed
+GRIPPER_MIN_FORCE = 20           # Minimum allowed force
+GRIPPER_MAX_FORCE = 255          # Maximum allowed force
+
+# Flex sensor filtering
+FLEX_DEADZONE = 3                # Percent - ignore changes smaller than this
+FLEX_SMOOTH_WINDOW = 5           # Moving average window size (Arduino-side)
+
+# Command rate limiting
+GRIPPER_UPDATE_INTERVAL = 0.05   # Minimum seconds between gripper commands (20 Hz)
 
 #==============================================================================
 # CONTROL PARAMETERS - OPTIMIZED FOR UR5e HIGH PERFORMANCE
@@ -184,6 +216,13 @@ ERROR_CODES = {
     'E501': 'IMU Communication Error',
     'E502': 'IMU Data Parse Error',
     'E503': 'IMU Calibration Error',
+    
+    # Gripper errors (E6xx)
+    'E601': 'Gripper Connection Error',
+    'E602': 'Gripper Activation Failed',
+    'E603': 'Gripper Command Timeout',
+    'E604': 'Flex Sensor Error',
+    'E605': 'Gripper Position Error',
 }
 
 # Robot mode names for diagnostics
