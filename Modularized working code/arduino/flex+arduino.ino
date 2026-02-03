@@ -55,7 +55,8 @@ enum ControlMode {
   GLOBAL_SWING = 3,       // Pin 27: Mode 3
   PRECISION_TCP_XY = 4,   // Pin 13 + 12: Mode 4
   ACTION_SCREW_GRIP = 5,  // Pin 12 + 27: Mode 5
-  TOOL_MIMIC = 6          // All pins (13+12+27): Mode 6
+  TOOL_MIMIC = 6,         // All pins (13+12+27): Mode 6
+  GRIPPER_ONLY = 7        // NEW: Mode 7
 };
 
 // ============================================================================
@@ -157,6 +158,7 @@ ControlMode determineControlMode(bool baseArm, bool vertical, bool tcpMode) {
   if (baseArm && vertical && tcpMode) return TOOL_MIMIC;
   
   // 2-button combos
+  if (baseArm && tcpMode) return GRIPPER_ONLY;         // NEW: Mode 7
   if (vertical && tcpMode) return ACTION_SCREW_GRIP;
   if (baseArm && vertical) return PRECISION_TCP_XY;
   

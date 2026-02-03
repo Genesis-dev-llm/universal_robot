@@ -10,15 +10,6 @@
         "max_velocity_scale": 1.0,
         "smoothing_window_size": 3
     },
-    "control": {
-        "base_translation": 0.02,
-        "base_rotation": 0.06,
-        "vertical": 0.006,
-        "tcp_translation": 0.005,
-        "tcp_vertical": 0.005,
-        "tcp_orientation": 0.03,
-        "robot_orientation": 0.05
-    },
     "imu_calibration": {
         "roll_offset": -4.7757,
         "pitch_offset": 6.555899999999997,
@@ -39,6 +30,7 @@
     },
     "gripper": {
         "enabled": true,
+        "locked": false,
         "default_speed": 255,
         "default_force": 150,
         "deadzone": 3,
