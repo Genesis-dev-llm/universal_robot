@@ -42,7 +42,6 @@
         "default_speed": 255,
         "default_force": 150,
         "deadzone": 3,
-        "spike_threshold": 15,
         "update_interval": 0.05
     }
 }
