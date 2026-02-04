@@ -9,6 +9,11 @@ CHANGES:
 - FIXED: Proper Robot→OpenGL coordinate frame conversion
 - ADDED: Flex sensor gripper integration
 
+PHASE 2 UPDATES:
+- Mode 7: Gripper-only control
+- Gripper lock status display
+- Updated help text with new controls
+
 Author: Professional Refactored Version
 Date: January 2025
 """
@@ -62,6 +67,7 @@ class VisualizationState:
     MODE BEHAVIOR:
     - Linear modes (1, 2, 3): Cube stays upright, position updates only
     - Orientation modes (4, 5, 6): Cube rotates to match hand orientation
+    - Mode 7: Cube stays upright (gripper only)
     """
     
     def __init__(self):
@@ -82,9 +88,9 @@ class VisualizationState:
         self.current_mode = imu_data['mode']
         
         # Determine if this mode should show rotation
-        # Modes 1, 2, 3: Linear only (no rotation)
+        # Modes 1, 2, 3, 7: Linear only (no rotation)
         # Modes 4, 5, 6: Orientation modes (show rotation)
-        if self.current_mode in [1, 2, 3]:
+        if self.current_mode in [1, 2, 3, 7]:  # PHASE 2: Added Mode 7
             self.should_show_rotation = False
         elif self.current_mode in [4, 5, 6]:
             self.should_show_rotation = True
@@ -117,9 +123,9 @@ class VisualizationState:
         # Get visualization-frame deltas using coordinate transform
         viz_trans = frame_transform.to_robot_translation(imu_euler)
         
-        # Reset velocity for pure rotation modes (4, 5, 6)
-        if self.current_mode in [4, 5, 6]:
-            if self.last_mode not in [4, 5, 6]:
+        # Reset velocity for pure rotation modes (4, 5, 6) and gripper mode (7)
+        if self.current_mode in [4, 5, 6, 7]:  # PHASE 2: Added Mode 7
+            if self.last_mode not in [4, 5, 6, 7]:
                 self.velocity = np.array([0.0, 0.0, 0.0])
             self.velocity *= (VELOCITY_DECAY - 0.15)
         
@@ -145,7 +151,7 @@ class VisualizationState:
             # FIXED: Robot Y (left/right) → OpenGL X (horizontal)
             self.velocity[0] -= viz_trans['y'] * 0.001 * runtime_config.LINEAR_SPEED_SCALE
         
-        # Modes 4, 5, 6: Position locked, only rotation updates (already handled above)
+        # Modes 4, 5, 6, 7: Position locked, only rotation updates (or stays upright)
     
     def update_physics(self):
         """Update physics simulation"""
@@ -174,7 +180,8 @@ class VisualizationState:
             3: (0.3, 0.3, 1.0),  # Blue - LATERAL_PRECISE
             4: (1.0, 1.0, 0.3),  # Yellow - WRIST_ORIENT
             5: (1.0, 0.3, 1.0),  # Magenta - WRIST_SCREW
-            6: (0.3, 1.0, 1.0)   # Cyan - TCP_ORIENT_MIMIC
+            6: (0.3, 1.0, 1.0),  # Cyan - TCP_ORIENT_MIMIC
+            7: (1.0, 0.6, 0.0)   # Orange - GRIPPER_ONLY (PHASE 2)
         }
         
         base_color = mode_colors.get(self.current_mode, (1.0, 1.0, 1.0))
@@ -185,7 +192,7 @@ class VisualizationState:
             return tuple(c * 0.6 for c in base_color)  # Dim if robot disabled
 
 #==============================================================================
-# STATUS BUILDER
+# STATUS BUILDER - PHASE 2: Added lock status
 #==============================================================================
 
 class StatusBuilder:
@@ -208,7 +215,7 @@ class StatusBuilder:
             f"Speed: {status.get('target_velocity', 0.0) * 100:.0f}% | Lin Scale: {runtime_config.LINEAR_SPEED_SCALE:.1f}x | Ang Scale: {runtime_config.ANGULAR_SPEED_SCALE:.1f}x"
         ]
         
-        # Gripper status line
+        # PHASE 2: Enhanced gripper status line with lock state
         gripper_status = status.get('gripper_status', 'DISABLED')
         gripper_pos = status.get('gripper_position', 0)
         gripper_speed = status.get('gripper_speed', 0)
@@ -216,8 +223,9 @@ class StatusBuilder:
         
         if gripper_status != "DISABLED":
             gripper_enabled_str = "ON" if runtime_config.GRIPPER_ENABLED else "OFF"
+            lock_str = "LOCKED" if runtime_config.GRIPPER_LOCKED else "FREE"  # PHASE 2
             status_lines.append(
-                f"Gripper: {gripper_status} ({gripper_enabled_str}) | Pos: {gripper_pos} | Spd: {gripper_speed} | Force: {gripper_force}"
+                f"Gripper: {gripper_status} ({gripper_enabled_str}/{lock_str}) | Pos: {gripper_pos} | Spd: {gripper_speed} | Force: {gripper_force}"
             )
         else:
             status_lines.append("Gripper: DISABLED")
@@ -238,7 +246,7 @@ class StatusBuilder:
 #==============================================================================
 
 def print_startup_info(config_manager, imu_calibration, imu_interface, runtime_config):
-    """Print startup information"""
+    """Print startup information - PHASE 2: Updated help text"""
     config_manager.print_summary()
     
     print("\nIMU Calibration Status:")
@@ -267,8 +275,9 @@ def print_startup_info(config_manager, imu_calibration, imu_interface, runtime_c
     print(f"Robot Control: {'ENABLED' if UR_ENABLED else 'DISABLED'}")
     print(f"Simulation Mode: {'ON' if UR_SIMULATE else 'OFF (REAL ROBOT)'}")
     print(f"Gripper Control: {'ENABLED' if runtime_config.GRIPPER_ENABLED else 'DISABLED'}")
+    print(f"Gripper Lock: {'LOCKED' if runtime_config.GRIPPER_LOCKED else 'UNLOCKED'}")  # PHASE 2
     print(f"Remapped Modes: {'ENABLED' if runtime_config.ENABLE_REMAPPED_MODES else 'DISABLED (SAFETY)'}")
-    print("\nControl Modes (Redesigned):")
+    print("\nControl Modes:")
     for mode_num, mode_name in CONTROL_MODES.items():
         if mode_num == 0:
             continue
@@ -276,7 +285,7 @@ def print_startup_info(config_manager, imu_calibration, imu_interface, runtime_c
     print("\nControls:")
     print("  [TAB] Switch View | [R] Reset | [U] Robot Power | [S] Emergency Stop")
     print("  [↑↓] Linear Speed | [←→] Angular Speed")
-    print("  [Shift+G] Gripper Toggle | [O] Open | [C] Close")
+    print("  [Shift+G] Gripper Toggle | [L] Gripper Lock | [O] Open | [C] Close")  # PHASE 2
     print("  [[ ]] Gripper Speed | [; '] Gripper Force")
     print("  [Shift+C] Calibrate IMU | [ESC] Quit")
     print("="*70 + "\n")
@@ -470,11 +479,12 @@ def main():
         traceback.print_exc()
     finally:
         print("\nClosing connections...")
-        # Save final speed settings
+        # Save final speed settings and gripper lock state
         config_manager.set(runtime_config.LINEAR_SPEED_SCALE, 'speed_scaling', 'linear_scale')
         config_manager.set(runtime_config.ANGULAR_SPEED_SCALE, 'speed_scaling', 'angular_scale')
         config_manager.set(runtime_config.GRIPPER_SPEED, 'gripper', 'default_speed')
         config_manager.set(runtime_config.GRIPPER_FORCE, 'gripper', 'default_force')
+        config_manager.set(runtime_config.GRIPPER_LOCKED, 'gripper', 'locked')  # PHASE 2
         config_manager.save_config()
         
         rtde_controller.close()  # This now also closes gripper

@@ -10,8 +10,14 @@ MODE 1 PRIORITY SYSTEM:
 - 5° deadzone prevents accidental dual triggering
 
 GRIPPER INTEGRATION:
-- Modes 1-3: Continuous flex tracking (hand motion → gripper)
+- Modes 1-3: Continuous flex tracking (hand motion → gripper) - RESPECTS LOCK
 - Modes 4-6: Gripper locked (orientation control, no flex tracking)
+- Mode 7: Gripper only control - BYPASSES LOCK
+
+PHASE 2 UPDATES:
+- Added Mode 7: Gripper-only control (buttons 13+27)
+- Gripper lock for Modes 1-3 (prevents accidental movement)
+- Mode 7 always updates gripper regardless of lock state
 """
 
 import numpy as np
@@ -30,6 +36,8 @@ class ControlModeDispatcher:
     """
     Dispatches control commands based on active mode
     Handles frame transformations, RTDE commands, and gripper control
+    
+    PHASE 2: Mode 7 gripper control and lock support
     """
     
     def __init__(self, rtde_controller):
@@ -85,22 +93,28 @@ class ControlModeDispatcher:
             self.last_mode = mode
         
         # ====================================================================
-        # GRIPPER CONTROL LOGIC
+        # GRIPPER CONTROL LOGIC - PHASE 2 UPDATES
         # ====================================================================
         flex_percent = imu_data.get('flex', 0)  # Get flex sensor value (0-100)
         
         # Determine if gripper should track flex based on mode
         gripper_enabled = runtime_config.GRIPPER_ENABLED
+        gripper_locked = runtime_config.GRIPPER_LOCKED
         gripper = self.rtde_controller.gripper
         
         if gripper and gripper.is_activated() and gripper_enabled:
-            # Modes 1-3: Continuous flex tracking (movement modes)
+            # Modes 1-3: Continuous flex tracking - CHECK LOCK
             if mode in [1, 2, 3]:
-                gripper.update_position(flex_percent)
+                if not gripper_locked:  # PHASE 2: Respect lock state
+                    gripper.update_position(flex_percent)
+                # If locked, do nothing (gripper holds position)
             
-            # Modes 4-6: Gripper locked (orientation modes)
-            # No flex tracking - gripper holds last position
-            # Mode 0 (IDLE): No tracking either
+            # Mode 7: Gripper-only control - BYPASS LOCK
+            elif mode == 7:
+                gripper.update_position(flex_percent)  # Always update, lock doesn't apply
+            
+            # Modes 4-6: No flex tracking (orientation modes)
+            # Gripper naturally holds last position
         
         # ====================================================================
         # ROBOT CONTROL LOGIC
@@ -336,6 +350,23 @@ class ControlModeDispatcher:
                     gain=500,
                     mode_name=mode_name
                 )
+                return
+            
+            # ================================================================
+            # MODE 7: GRIPPER ONLY - PHASE 2
+            # ================================================================
+            elif mode == 7:
+                # Gripper control handled at top of function (bypasses lock)
+                # Keep robot stationary
+                self.rtde_controller.move_speed(
+                    [0.0]*3, [0.0]*3, 
+                    acceleration=1.0, 
+                    mode_name=mode_name
+                )
+                
+                # Update display velocities (robot stationary)
+                self.current_velocity = np.array([0.0, 0.0, 0.0])
+                self.current_angular_velocity = np.array([0.0, 0.0, 0.0])
                 return
             
             # ================================================================

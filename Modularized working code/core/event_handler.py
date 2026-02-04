@@ -3,6 +3,7 @@ Keyboard event handling
 Processes user input and keyboard shortcuts
 
 UPDATED: Added gripper control hotkeys
+PHASE 2: Added gripper lock toggle (L key)
 """
 
 import pygame
@@ -11,7 +12,7 @@ from pygame.locals import *
 class EventHandler:
     """
     Handles keyboard events and user input
-    Now includes gripper controls
+    Now includes gripper controls and lock
     """
     
     def __init__(self, config_manager, runtime_config, imu_calibration, rtde_controller, vis_state=None, control_dispatcher=None):
@@ -149,9 +150,17 @@ class EventHandler:
                 status = "ENABLED" if self.runtime_config.GRIPPER_ENABLED else "DISABLED"
                 print(f"Gripper control: {status}")
                 self.config_manager.set(self.runtime_config.GRIPPER_ENABLED, 
-                                       'gripper', 'enabled')
+                                       'gripper', 'enabled')  # ← value, section, key
             else:
                 print("[SAFETY] Gripper toggle requires SHIFT + G")
+        
+        elif key == pygame.K_l:
+            # PHASE 2: Toggle gripper lock (prevents accidental movement in Modes 1-3)
+            self.runtime_config.GRIPPER_LOCKED = not self.runtime_config.GRIPPER_LOCKED
+            status = "LOCKED" if self.runtime_config.GRIPPER_LOCKED else "UNLOCKED"
+            print(f"Gripper position: {status}")
+            self.config_manager.set(self.runtime_config.GRIPPER_LOCKED, 
+                                   'gripper', 'locked')  # ← value, section, key
         
         elif key == pygame.K_o:
             # Manual open gripper

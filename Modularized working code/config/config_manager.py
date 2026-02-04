@@ -1,6 +1,10 @@
 """
 Configuration management system
 Handles loading, saving, and accessing configuration parameters
+
+PHASE 2 UPDATES:
+- Added gripper lock configuration
+- Removed dead 'control' section (values come from constants.py)
 """
 
 import json
@@ -23,15 +27,6 @@ class ConfigManager:
             'deadzone_ramp_width': 2.0,
             'max_velocity_scale': 1.0
         },
-        'control': {
-            'base_translation': 0.002,
-            'base_rotation': 0.01,
-            'vertical': 0.002,
-            'tcp_translation': 0.0005,
-            'tcp_vertical': 0.0005,
-            'tcp_orientation': 0.005,
-            'robot_orientation': 0.008
-        },
         'imu_calibration': {
             'roll_offset': 0.0,
             'pitch_offset': 0.0,
@@ -52,6 +47,7 @@ class ConfigManager:
         },
         'gripper': {
             'enabled': True,
+            'locked': False,  # PHASE 2: Gripper position lock for Modes 1-3
             'default_speed': 255,
             'default_force': 150,
             'deadzone': 3,
@@ -111,7 +107,11 @@ class ConfigManager:
         return self.config.get(section, {}).get(key, default)
     
     def set(self, value, section, key):
-        """Set a configuration value"""
+        """
+        Set a configuration value
+        
+        NOTE: Argument order is (value, section, key) - backwards from most APIs
+        """
         if section not in self.config:
             self.config[section] = {}
         self.config[section][key] = value
@@ -149,6 +149,7 @@ class RuntimeConfig:
         
         # Gripper Control
         self.GRIPPER_ENABLED = config_manager.get('gripper', 'enabled', True)
+        self.GRIPPER_LOCKED = config_manager.get('gripper', 'locked', False)  # PHASE 2: Lock state
         self.GRIPPER_SPEED = config_manager.get('gripper', 'default_speed', 255)
         self.GRIPPER_FORCE = config_manager.get('gripper', 'default_force', 150)
         

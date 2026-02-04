@@ -12,6 +12,8 @@ OPTIMIZED FOR UR5e:
 ADDED: Hand-E Gripper Integration
 - Gripper control via flex sensor input
 - Socket communication on port 63352
+
+PHASE 2: Mode 7 - Gripper Only Control
 """
 
 import math
@@ -96,6 +98,7 @@ GRIPPER_UPDATE_INTERVAL = 0.05   # Minimum seconds between gripper commands (20 
 
 #==============================================================================
 # CONTROL PARAMETERS - OPTIMIZED FOR UR5e HIGH PERFORMANCE
+# NOTE: These are the ACTIVE values used by control_modes.py
 #==============================================================================
 
 CONTROL_PARAMS = {
@@ -143,6 +146,7 @@ IMU_AXIS_MAPPING = {
 
 #==============================================================================
 # CONTROL MODES - REDESIGNED FOR CRANE + WRIST CONTROL
+# PHASE 2: Added Mode 7 - Gripper Only Control
 #==============================================================================
 
 CONTROL_MODES = {
@@ -152,7 +156,8 @@ CONTROL_MODES = {
     3: "LATERAL_PRECISE",      # Precise left/right translation
     4: "WRIST_ORIENT",         # Wrist 1 & 2 orientation control
     5: "WRIST_SCREW",          # Wrist 3 rotation (screwdriver motion)
-    6: "TCP_ORIENT_MIMIC"      # Absolute orientation mimic mode
+    6: "TCP_ORIENT_MIMIC",     # Absolute orientation mimic mode
+    7: "GRIPPER_ONLY"          # PHASE 2: Gripper control only (buttons 13+27)
 }
 
 #==============================================================================
