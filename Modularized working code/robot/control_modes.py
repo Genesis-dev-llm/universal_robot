@@ -9,15 +9,14 @@ MODE 1 PRIORITY SYSTEM:
   * If forward/back tilt stronger: Use speedL for TCP translation
 - 5° deadzone prevents accidental dual triggering
 
-GRIPPER INTEGRATION:
-- Modes 1-3: Continuous flex tracking (hand motion → gripper) - RESPECTS LOCK
-- Modes 4-6: Gripper locked (orientation control, no flex tracking)
-- Mode 7: Gripper only control - BYPASSES LOCK
+GRIPPER INTEGRATION - UPDATED:
+- Modes 1-6: Continuous flex tracking (respects LOCK)
+- Mode 7: Gripper-only control (BYPASSES lock)
+- Universal gripper: Now works in ALL modes
 
-PHASE 2 UPDATES:
-- Added Mode 7: Gripper-only control (buttons 13+27)
-- Gripper lock for Modes 1-3 (prevents accidental movement)
-- Mode 7 always updates gripper regardless of lock state
+MODE 3 UPDATE:
+- Now supports full XY plane control (both forward/back and left/right)
+- Uses base frame directly (no TCP transformation)
 """
 
 import numpy as np
@@ -37,7 +36,7 @@ class ControlModeDispatcher:
     Dispatches control commands based on active mode
     Handles frame transformations, RTDE commands, and gripper control
     
-    PHASE 2: Mode 7 gripper control and lock support
+    UPDATED: Universal gripper support for all modes
     """
     
     def __init__(self, rtde_controller):
@@ -93,7 +92,7 @@ class ControlModeDispatcher:
             self.last_mode = mode
         
         # ====================================================================
-        # GRIPPER CONTROL LOGIC - PHASE 2 UPDATES
+        # UNIVERSAL GRIPPER CONTROL LOGIC - UPDATED
         # ====================================================================
         flex_percent = imu_data.get('flex', 0)  # Get flex sensor value (0-100)
         
@@ -103,18 +102,15 @@ class ControlModeDispatcher:
         gripper = self.rtde_controller.gripper
         
         if gripper and gripper.is_activated() and gripper_enabled:
-            # Modes 1-3: Continuous flex tracking - CHECK LOCK
-            if mode in [1, 2, 3]:
-                if not gripper_locked:  # PHASE 2: Respect lock state
-                    gripper.update_position(flex_percent)
-                # If locked, do nothing (gripper holds position)
-            
             # Mode 7: Gripper-only control - BYPASS LOCK
-            elif mode == 7:
-                gripper.update_position(flex_percent)  # Always update, lock doesn't apply
+            if mode == 7:
+                gripper.update_position(flex_percent)
             
-            # Modes 4-6: No flex tracking (orientation modes)
-            # Gripper naturally holds last position
+            # Modes 1-6: Universal gripper - RESPECT LOCK
+            elif mode in [1, 2, 3, 4, 5, 6]:
+                if not gripper_locked:
+                    gripper.update_position(flex_percent)
+                # If locked, gripper holds position (no update)
         
         # ====================================================================
         # ROBOT CONTROL LOGIC
@@ -150,9 +146,9 @@ class ControlModeDispatcher:
         robot_trans = frame_transform.to_robot_translation(imu_euler)
         robot_rot = frame_transform.to_robot_rotation(imu_euler)
         
-        # Get current TCP orientation for frame transformations (Modes 1 & 3)
+        # Get current TCP orientation for frame transformations (Mode 1 only now)
         current_tcp_orientation = [0.0, 0.0, 0.0]
-        if mode in [1, 3] and self.rtde_controller.rtde_r:
+        if mode == 1 and self.rtde_controller.rtde_r:
             try:
                 current_pose = self.rtde_controller.rtde_r.getActualTCPPose()
                 if current_pose:
@@ -232,22 +228,17 @@ class ControlModeDispatcher:
                 )
             
             # ================================================================
-            # MODE 3: LATERAL PRECISE
+            # MODE 3: BASE XY PLANE CONTROL - UPDATED
             # ================================================================
             elif mode == 3:
-                # Get TCP-frame lateral velocity
-                tcp_linear_vel, velocity_rot = self.movement_modes.calculate_lateral_precise(
-                    robot_trans['y'],
+                # Get base-frame XY velocity (no transformation needed)
+                velocity_pos, velocity_rot = self.movement_modes.calculate_lateral_precise(
+                    robot_trans['x'],  # Forward/back → Base Y
+                    robot_trans['y'],  # Left/right → Base X
                     runtime_config.LINEAR_SPEED_SCALE
                 )
-                
-                # Transform TCP-frame linear velocity to base frame
-                base_linear_vel = transform_tcp_velocity_to_base(
-                    tcp_linear_vel,
-                    current_tcp_orientation
-                )
-                
-                velocity_pos = base_linear_vel
+                # velocity_pos is already in base frame [vx, vy, 0]
+                # No TCP transformation needed!
             
             # ================================================================
             # MODE 4: WRIST ORIENTATION (Wrist 1 & 2) - CORRECTED
@@ -353,7 +344,7 @@ class ControlModeDispatcher:
                 return
             
             # ================================================================
-            # MODE 7: GRIPPER ONLY - PHASE 2
+            # MODE 7: GRIPPER ONLY
             # ================================================================
             elif mode == 7:
                 # Gripper control handled at top of function (bypasses lock)

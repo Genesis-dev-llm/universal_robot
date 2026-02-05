@@ -10,18 +10,14 @@ UR BASE FRAME CONVENTION (ISO 9787):
 REDESIGNED MODE SYSTEM:
 - Mode 1: Crane control (TCP translation OR base rotation - priority based)
 - Mode 2: Vertical Z control
-- Mode 3: Lateral precise control (TCP-relative)
+- Mode 3: Base XY plane control (UPDATED - full XY translation in base frame)
 - Mode 4: Wrist 1 & 2 direct joint control (speedJ)
 - Mode 5: Wrist 3 screwdriver motion (speedJ)
 - Mode 6: Full orientation mimic (handled separately)
 
-FIXES APPLIED:
-- Mode 1: Forward/back now uses Y-axis (was X-axis)
-- Mode 1: Base rotation uses speedJ for true crane behavior
-- Mode 3: Left/right now uses X-axis (was Y-axis)
-- Mode 4: Wrist 1 rotation direction inverted
-- Mode 5: Wrist 3 rotation direction inverted
-- Deadzone increased to 5° for all modes
+UPDATED:
+- Mode 3: Now handles both X and Y axes for full base-frame XY plane control
+- No TCP transformation needed - direct base frame velocities
 """
 
 from config.constants import CONTROL_PARAMS
@@ -132,27 +128,32 @@ class MovementModes:
         return (linear_velocity, angular_velocity)
     
     @staticmethod
-    def calculate_lateral_precise(y_delta, linear_scale):
+    def calculate_lateral_precise(x_delta, y_delta, linear_scale):
         """
-        MODE 3: Lateral Precise Control
+        MODE 3: Base XY Plane Control (UPDATED)
         
         Behavior:
-        - Left/Right tilt → TCP moves left/right (UR X-axis in TCP frame)
+        - Left/Right tilt → Robot moves left/right (UR X-axis in BASE frame)
+        - Forward/Back tilt → Robot moves forward/back (UR Y-axis in BASE frame)
+        
+        CHANGED: Now accepts both X and Y deltas for full XY plane control
+        No TCP transformation needed - velocities are directly in base frame
         
         Args:
+            x_delta: Forward/back input (degrees)
             y_delta: Left/right input (degrees)
             linear_scale: Linear speed multiplier
         
         Returns:
-            Tuple: (linear_velocity_tcp_frame, angular_velocity)
-            - linear: [vx, 0, 0] in TCP frame (needs transformation in dispatcher)
+            Tuple: (linear_velocity_base_frame, angular_velocity)
+            - linear: [vx, vy, 0] in BASE frame (direct control, no transformation needed)
             - angular: [0, 0, 0]
         """
-        # Left/right translation uses UR X-axis
+        # Base frame XY plane translation
         linear_velocity = [
             y_delta * CONTROL_PARAMS['tcp_translation'] * linear_scale,  # X = Left/Right
-            0.0,
-            0.0
+            x_delta * CONTROL_PARAMS['tcp_translation'] * linear_scale,  # Y = Forward/Back
+            0.0                                                           # Z = No vertical
         ]
         
         angular_velocity = [0.0, 0.0, 0.0]

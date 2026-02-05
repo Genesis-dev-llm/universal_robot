@@ -113,7 +113,7 @@ CONTROL_PARAMS = {
 }
 
 # Movement filtering parameters
-MOVEMENT_DEADZONE = 5.0  # degrees - no movement below this
+MOVEMENT_DEADZONE = 10.0  # degrees - no movement below this
 DEADZONE_RAMP_WIDTH = 5.0  # degrees - gradual ramp zone (5-10 deg)
 VELOCITY_DECAY = 0.95  # visualization smoothing
 
