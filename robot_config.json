@@ -22,7 +22,7 @@
         "camera_distance": 20.0
     },
     "speed_scaling": {
-        "linear_scale": 0.20000000000000015,
+        "linear_scale": 0.40000000000000013,
         "angular_scale": 0.20000000000000004,
         "min_scale": 0.1,
         "max_scale": 2.0,

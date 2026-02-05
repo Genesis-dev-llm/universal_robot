@@ -36,22 +36,13 @@ UR_ROBOT_IP = "192.168.1.191"
 UR_ENABLED = True  # Set True to enable robot control
 UR_SIMULATE = False  # Set False for real robot commands
 
-# UR5e Joint Limits (radians)
-UR_JOINT_LIMITS = {
-    'joint_0': (-2*math.pi, 2*math.pi),      # Base: ±360°
-    'joint_1': (-2*math.pi, 2*math.pi),      # Shoulder: ±360°
-    'joint_2': (-2*math.pi, 2*math.pi),      # Elbow: ±360°
-    'joint_3': (-2*math.pi, 2*math.pi),      # Wrist 1: ±360°
-    'joint_4': (-2*math.pi, 2*math.pi),      # Wrist 2: ±360°
-    'joint_5': (-2*math.pi, 2*math.pi),      # Wrist 3: ±360°
-}
 
 # UR5e Workspace limits (meters, relative to robot base)
 # UR5e reach: 850mm, but we use safety margins
 UR_LIMITS = {
     'x_min': -0.80, 'x_max': 0.80,
     'y_min': -0.80, 'y_max': 0.80,
-    'z_min': 0.00, 'z_max': 1.0      # UR5e can go lower and slightly higher
+    'z_min': -1.0, 'z_max': 2.0      # UR5e can go lower (below base) and higher
 }
 
 # UR5e Control parameters
@@ -163,15 +154,6 @@ CONTROL_MODES = {
 #==============================================================================
 # SAFETY THRESHOLDS
 #==============================================================================
-
-# Singularity thresholds (radians) - UR5e has better singularity handling
-WRIST_SINGULARITY_THRESHOLD = 0.10   # CHANGED: 0.15 -> 0.10 (UR5e can get closer)
-SHOULDER_SINGULARITY_THRESHOLD = 0.10
-ELBOW_SINGULARITY_THRESHOLD = 0.08   # CHANGED: 0.10 -> 0.08
-
-# Joint safety margin (radians)
-JOINT_SAFETY_MARGIN = 0.05  # ~3 degrees
-
 # Connection settings
 MAX_RECONNECT_ATTEMPTS = 5
 RECONNECT_COOLDOWN = 2.0  # seconds

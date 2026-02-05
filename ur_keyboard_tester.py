@@ -13,11 +13,11 @@ from pygame.locals import *
 
 # Robot Configuration
 ROBOT_IP = "192.168.1.191"
-SPEED_DEFAULT = 0.05
-SPEED_MIN = 0.01
-SPEED_MAX = 0.20  # 4x higher than original 0.05
-SPEED_INCREMENT = 0.05  # Changed from 0.01
-ACCEL = 0.5
+SPEED_DEFAULT = 1.0
+SPEED_MIN = 0.1
+SPEED_MAX = 100.0  # 4x higher than original 0.05
+SPEED_INCREMENT = 1.0
+ACCEL = 1.0
 
 # Gripper Configuration
 GRIPPER_MIN_POS = 0      # Fully open (mm)

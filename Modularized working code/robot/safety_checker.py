@@ -1,25 +1,28 @@
 """
 Robot safety validation system
-All safety checks for robot operations
+Validates robot state and command data integrity
 
-UPDATED: Added gripper safety validations
+CLEANED UP VERSION:
+- Removed singularity checks (UR controller handles this)
+- Removed joint limit checks (IK solver handles this)
+- Kept essential validations: robot state, data integrity, gripper safety
 """
 
 import math
 from core.error_handler import RobotError
 from core.math_utils import is_valid_pose
 from config.constants import (
-    UR_JOINT_LIMITS, JOINT_SAFETY_MARGIN,
-    WRIST_SINGULARITY_THRESHOLD, SHOULDER_SINGULARITY_THRESHOLD,
-    ELBOW_SINGULARITY_THRESHOLD, ROBOT_MODE_NAMES, SAFETY_MODE_NAMES,
-    GRIPPER_MIN_POSITION, GRIPPER_MAX_POSITION, GRIPPER_MIN_SPEED,
-    GRIPPER_MAX_SPEED, GRIPPER_MIN_FORCE, GRIPPER_MAX_FORCE
+    ROBOT_MODE_NAMES, SAFETY_MODE_NAMES,
+    GRIPPER_MIN_POSITION, GRIPPER_MAX_POSITION, 
+    GRIPPER_MIN_SPEED, GRIPPER_MAX_SPEED, 
+    GRIPPER_MIN_FORCE, GRIPPER_MAX_FORCE
 )
+
 
 class SafetyChecker:
     """
-    Validates robot state and motion safety
-    Now includes gripper safety checks
+    Validates robot state and command data integrity
+    Focus: State validation and data sanity checks only
     """
     
     def __init__(self, rtde_receive=None, log_file=None):
@@ -39,13 +42,14 @@ class SafetyChecker:
     
     def validate_robot_state(self):
         """
-        Check if robot is in safe state to accept commands
+        Check if robot is in safe operational state
         
         Returns:
             Tuple (is_valid: bool, message: str)
         """
         if not self.rtde_r:
-            return False, RobotError.format_error('E101', details="RTDE not initialized")
+            return False, RobotError.format_error('E101', 
+                details="RTDE not initialized")
         
         try:
             # Check robot mode
@@ -59,7 +63,8 @@ class SafetyChecker:
             # Check safety status
             safety_status = self.rtde_r.getSafetyMode()
             if safety_status != 1:  # 1 = Normal
-                safety_name = SAFETY_MODE_NAMES.get(safety_status, f"Unknown ({safety_status})")
+                safety_name = SAFETY_MODE_NAMES.get(safety_status, 
+                    f"Unknown ({safety_status})")
                 
                 if safety_status == 3:
                     return False, RobotError.format_error('E202',
@@ -77,11 +82,12 @@ class SafetyChecker:
             return True, "OK"
             
         except Exception as e:
-            return False, RobotError.format_error('E101', str(e), "State validation failed")
+            return False, RobotError.format_error('E101', str(e), 
+                "State validation failed")
     
     def validate_pose_data(self, pose):
         """
-        Validate pose data before sending to robot
+        Validate pose data integrity (NaN/Inf checks)
         
         Args:
             pose: Target pose [x, y, z, rx, ry, rz]
@@ -96,109 +102,49 @@ class SafetyChecker:
         
         return True, "OK"
     
-    def check_joint_limits(self, target_pose):
+    def validate_velocity_data(self, velocity_vector):
         """
-        Check if target pose would violate joint limits
+        Validate velocity command data integrity
         
         Args:
-            target_pose: Target TCP pose [x, y, z, rx, ry, rz]
+            velocity_vector: 6D velocity [vx, vy, vz, rx, ry, rz]
         
         Returns:
-            Tuple (is_safe: bool, message: str)
+            Tuple (is_valid: bool, message: str)
         """
-        if not self.rtde_r:
-            return True, "No robot connection"
+        if len(velocity_vector) != 6:
+            return False, RobotError.format_error('E305',
+                details=f"Expected 6 values, got {len(velocity_vector)}",
+                context=f"Velocity: {velocity_vector}")
         
-        try:
-            current_joints = self.rtde_r.getActualQ()
-            if not current_joints or len(current_joints) != 6:
-                return True, "Could not read joints"
-            
-            # Use inverse kinematics to predict joint positions
-            predicted_joints = self.rtde_r.getInverseKinematics(target_pose, current_joints)
-            
-            if not predicted_joints or len(predicted_joints) != 6:
-                return False, RobotError.format_error('E304', 
-                    details="IK solution not found",
-                    context="Pose may be unreachable")
-            
-            # Check each joint
-            joint_names = ['Base', 'Shoulder', 'Elbow', 'Wrist1', 'Wrist2', 'Wrist3']
-            limit_list = [
-                UR_JOINT_LIMITS['joint_0'], UR_JOINT_LIMITS['joint_1'],
-                UR_JOINT_LIMITS['joint_2'], UR_JOINT_LIMITS['joint_3'],
-                UR_JOINT_LIMITS['joint_4'], UR_JOINT_LIMITS['joint_5']
-            ]
-            
-            for i, (joint_val, (min_val, max_val)) in enumerate(zip(predicted_joints, limit_list)):
-                if joint_val < (min_val + JOINT_SAFETY_MARGIN) or joint_val > (max_val - JOINT_SAFETY_MARGIN):
-                    return False, RobotError.format_error('E301',
-                        details=f"{joint_names[i]} would exceed limit",
-                        context=f"Predicted: {math.degrees(joint_val):.1f}°, Range: [{math.degrees(min_val):.1f}°, {math.degrees(max_val):.1f}°]")
-            
-            return True, "OK"
-            
-        except Exception as e:
-            if self.log_file:
-                RobotError.log_error(self.log_file, 'E301', str(e), "Joint limit check error")
-            return False, f"Joint limit check error: {str(e)}"
+        if not all(math.isfinite(v) for v in velocity_vector):
+            return False, RobotError.format_error('E305',
+                details="NaN or Inf in velocity command",
+                context=f"Velocity: {velocity_vector}")
+        
+        return True, "OK"
     
-    def check_singularity_proximity(self, target_pose=None):
+    def validate_joint_velocity_data(self, joint_velocities):
         """
-        Check for kinematic singularities
+        Validate joint velocity command data integrity
         
         Args:
-            target_pose: Optional target pose to check, or None for current position
+            joint_velocities: 6 joint velocities [q0, q1, q2, q3, q4, q5]
         
         Returns:
-            Tuple (is_safe: bool, message: str)
+            Tuple (is_valid: bool, message: str)
         """
-        if not self.rtde_r:
-            return True, "No robot connection"
+        if len(joint_velocities) != 6:
+            return False, RobotError.format_error('E305',
+                details=f"Expected 6 joint values, got {len(joint_velocities)}",
+                context=f"Joint velocities: {joint_velocities}")
         
-        try:
-            if target_pose:
-                current_joints = self.rtde_r.getActualQ()
-                joint_positions = self.rtde_r.getInverseKinematics(target_pose, current_joints)
-                if not joint_positions:
-                    return False, RobotError.format_error('E302',
-                        details="IK failed",
-                        context="Pose may be singular")
-            else:
-                joint_positions = self.rtde_r.getActualQ()
-                if not joint_positions:
-                    return True, "Could not read joints"
-            
-            # Wrist singularity (J4 near zero)
-            if abs(joint_positions[4]) < WRIST_SINGULARITY_THRESHOLD:
-                return False, RobotError.format_error('E302',
-                    details=f"Wrist singularity: J4={math.degrees(joint_positions[4]):.1f}°",
-                    context="Wrist axes aligned")
-            
-            # Shoulder singularity (TCP above/below base)
-            shoulder_elbow_sum = abs(joint_positions[1] + joint_positions[2])
-            if shoulder_elbow_sum < SHOULDER_SINGULARITY_THRESHOLD:
-                return False, RobotError.format_error('E302',
-                    details=f"Shoulder singularity: J1+J2={math.degrees(shoulder_elbow_sum):.1f}°",
-                    context="TCP near base axis")
-            
-            # Elbow singularity (arm fully extended/retracted)
-            if abs(joint_positions[2]) < ELBOW_SINGULARITY_THRESHOLD:
-                return False, RobotError.format_error('E302',
-                    details=f"Elbow singularity: J2={math.degrees(joint_positions[2]):.1f}°",
-                    context="Arm near full extension")
-            
-            if abs(abs(joint_positions[2]) - math.pi) < ELBOW_SINGULARITY_THRESHOLD:
-                return False, RobotError.format_error('E302',
-                    details=f"Elbow singularity: J2={math.degrees(joint_positions[2]):.1f}°",
-                    context="Arm near full retraction")
-            
-            return True, "OK"
-            
-        except Exception as e:
-            if self.log_file:
-                RobotError.log_error(self.log_file, 'E302', str(e), "Singularity check error")
-            return False, f"Singularity check error: {str(e)}"
+        if not all(math.isfinite(v) for v in joint_velocities):
+            return False, RobotError.format_error('E305',
+                details="NaN or Inf in joint velocity command",
+                context=f"Joint velocities: {joint_velocities}")
+        
+        return True, "OK"
     
     # ========================================================================
     # GRIPPER SAFETY VALIDATIONS
